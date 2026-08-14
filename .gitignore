@@ -1,0 +1,28 @@
+# --- secrets ---------------------------------------------------------------
+.env
+
+# --- python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# --- node / vite -----------------------------------------------------------
+frontend/node_modules/
+frontend/dist/
+
+# --- generated at runtime --------------------------------------------------
+backend/media/*
+!backend/media/.gitkeep
+backend/logs/*
+!backend/logs/.gitkeep
+backend/storage/*
+!backend/storage/.gitkeep
+
+# --- data (never commit the Kaggle dataset; sample CSV stays tracked) ------
+data/raw/
+data/processed/
+
+# --- misc ------------------------------------------------------------------
+.DS_Store
+nohup.out

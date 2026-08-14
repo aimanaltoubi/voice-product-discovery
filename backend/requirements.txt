@@ -1,0 +1,36 @@
+# --- Web API ---
+fastapi>=0.111
+# Plain uvicorn (no [standard]): the uvloop extra breaks the MCP stdio
+# subprocess transport; we run on the stock asyncio loop (see run.sh).
+uvicorn>=0.30
+python-multipart>=0.0.9
+python-dotenv>=1.0
+
+# --- Agentic orchestration (LangGraph is mandated by the project brief) ---
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-openai>=0.2.0
+# Optional providers (install the one you use, see .env.example):
+# langchain-anthropic>=0.2.0
+# langchain-google-genai>=2.0.0
+# langchain-ollama>=0.2.0
+
+# --- MCP server + client (two-tool requirement: web.search, rag.search) ---
+# MCP SDK — pinned to 1.x: the 2.0 client-session API is not yet stable with
+# stdio subprocess servers (server.py also supports 2.x via a fallback import).
+mcp>=1.2.0,<2
+
+# --- Agentic RAG (vector store + parquet data pipeline) ---
+chromadb>=0.5.0
+onnxruntime>=1.17          # local MiniLM embeddings (chroma default EF)
+pandas>=2.0
+pyarrow>=15.0
+
+# --- web.search backends ---
+ddgs>=9.0                  # keyless DuckDuckGo fallback (default)
+httpx>=0.27                # Serper / Brave / Tavily adapters
+
+# --- Speech ---
+faster-whisper>=1.0        # local Whisper ASR (default, no API key)
+edge-tts>=6.1              # free neural TTS (default, no API key)
+openai>=1.40               # OpenAI ASR/TTS/embeddings options + LLM SDK

@@ -146,19 +146,17 @@ scripts/smoke_test.py    keyless offline end-to-end test
 run.sh · .env.example
 ```
 
-## How this maps to the assignment rubric (100 pts)
 
-| Rubric item | Where it’s satisfied |
+| item | Where it’s satisfied |
 |---|---|
-| **Functionality – 28** (end-to-end voice flow; multi-agent routing; citations shown) | Mic → `/api/transcribe` (Whisper) → `/api/discover` (LangGraph, `backend/graph/`) → `/api/speak` (TTS auto-plays). Router/planner/retriever/answerer + safety and reconcile nodes with conditional edges (`graph/build.py`). Citations rendered with `doc_id` (private) and URLs (live) — `CitationList.jsx`, built in `graph/build.py`. |
-| **Agentic RAG Quality – 22** (accurate retrieval; grounded answers; sensible hybrid use) | Embeddings over title+features+review snippets (`rag/ingest.py`) in Chroma; **hybrid** vector + metadata filters (price/category/material/eco) with a logged relaxation ladder (`rag/retrieval.py`); LLM reranker validated in code; answerer grounded to retrieved rows with citation/top-pick validation and price-per-oz normalization. |
-| **MCP Server – 15** (two tools working; discovery & schemas; caching/logging) | Exactly `web.search` + `rag.search` (`mcp_server/server.py`), stdio (or HTTP) transport, standard `tools/list` discovery with JSON schemas (visible at `GET /api/health`), TTL cache 60–300 s + per-tool rate limits, JSONL logging with timestamps and source URLs. Contracts: `docs/mcp_schemas.md`. |
-| **Planning & Tool Use – 10** (clear plans; conflict handling; reconciliation) | Planner LLM output + deterministic rubric enforcement (“prefer rag.search; add web.search only for current/latest/availability”) with `enforced_rules` in the step log (`nodes.py::planner_node`); reconcile node matches catalog↔web by normalized title/brand similarity (SKU-less web rows), flags >15 % price deltas and availability; critic forces discrepancy mention into the spoken answer. |
-| **UI/UX – 10** (clean app; transcript; comparison table; audio playback) | React app: `MicRecorder` (record/upload), editable transcript, `AgentStepLog` (every node’s input/output/timestamp), `ComparisonTable` (price, $/oz, rating, ingredients, top-pick highlight), `CitationList`, auto TTS playback with replay. |
-| **Presentation – 10** | Suggested ≤7-min demo flow below; architecture/results/limitations in this README + `docs/`. |
-| **Prompt Disclosure – 5** | [`prompts/`](prompts/) is the **runtime source** (loaded by `graph/prompts.py`, not copies): system prompt, router + few-shots, planner (contains the planner rubric verbatim), reranker, answerer/critic, and a prompt→node→schema mapping table in `prompts/README.md`. Prompts and provider names are logged per step. |
+| **Functionality** (end-to-end voice flow; multi-agent routing; citations shown) | Mic → `/api/transcribe` (Whisper) → `/api/discover` (LangGraph, `backend/graph/`) → `/api/speak` (TTS auto-plays). Router/planner/retriever/answerer + safety and reconcile nodes with conditional edges (`graph/build.py`). Citations rendered with `doc_id` (private) and URLs (live) — `CitationList.jsx`, built in `graph/build.py`. |
+| **Agentic RAG Quality** (accurate retrieval; grounded answers; sensible hybrid use) | Embeddings over title+features+review snippets (`rag/ingest.py`) in Chroma; **hybrid** vector + metadata filters (price/category/material/eco) with a logged relaxation ladder (`rag/retrieval.py`); LLM reranker validated in code; answerer grounded to retrieved rows with citation/top-pick validation and price-per-oz normalization. |
+| **MCP Server** (two tools working; discovery & schemas; caching/logging) | Exactly `web.search` + `rag.search` (`mcp_server/server.py`), stdio (or HTTP) transport, standard `tools/list` discovery with JSON schemas (visible at `GET /api/health`), TTL cache 60–300 s + per-tool rate limits, JSONL logging with timestamps and source URLs. Contracts: `docs/mcp_schemas.md`. |
+| **Planning & Tool Use** (clear plans; conflict handling; reconciliation) | Planner LLM output + deterministic rubric enforcement (“prefer rag.search; add web.search only for current/latest/availability”) with `enforced_rules` in the step log (`nodes.py::planner_node`); reconcile node matches catalog↔web by normalized title/brand similarity (SKU-less web rows), flags >15 % price deltas and availability; critic forces discrepancy mention into the spoken answer. |
+| **UI/UX** (clean app; transcript; comparison table; audio playback) | React app: `MicRecorder` (record/upload), editable transcript, `AgentStepLog` (every node’s input/output/timestamp), `ComparisonTable` (price, $/oz, rating, ingredients, top-pick highlight), `CitationList`, auto TTS playback with replay. |
+| **Prompt Disclosure** | [`prompts/`](prompts/) is the **runtime source** (loaded by `graph/prompts.py`, not copies): system prompt, router + few-shots, planner (contains the planner rubric verbatim), reranker, answerer/critic, and a prompt→node→schema mapping table in `prompts/README.md`. Prompts and provider names are logged per step. |
 
-Assignment tasks not in the point table but required: fragment-based ASR
+required: fragment-based ASR
 (timestamped Whisper segments, `speech/asr.py`) and fragment-based TTS with
 a ~40-word spoken summary ending in the *“most affordable or highest
 rated?”* follow-up (`prompts/answerer.md`, `speech/tts.py`); model-agnostic
@@ -166,15 +164,6 @@ LLM via env (`graph/llm.py`); `.env.example` + `run.sh`; safety
 (domain allowlist, no unsafe chemical advice, no secret logging —
 `docs/safety.md`); Amazon-2020 ingestion with parquet outputs
 (`data/README.md`).
-
-## Suggested ≤7-minute demo
-
-1. **(30 s)** Architecture slide = the diagram above: voice → graph → MCP tools → voice.
-2. **(1 min)** `GET /api/health` in the browser: show MCP tool discovery (names + JSON schemas).
-3. **(2 min)** Speak query 1 (eco stainless under $15). Walk the step log top-down: router constraints → planner sources/filters (+ enforced rules) → rag.search candidates + rerank rationale → grounded answer; show table ($/oz), citations, audio.
-4. **(1.5 min)** Query 2 (“current price… right now”): planner adds `web.search`; show live results, reconcile output (similarity, price delta), and the discrepancy note in the spoken answer if flagged.
-5. **(1 min)** Query 3 (bleach + ammonia): safety gate blocks; show `blocked` banner + safe spoken refusal.
-6. **(1 min)** Wrap: `prompts/` folder, JSONL logs (`backend/logs/`), limitations & next steps.
 
 ## Troubleshooting
 
@@ -200,11 +189,3 @@ LLM via env (`graph/llm.py`); `.env.example` + `run.sh`; safety
 - `LLM_PROVIDER=mock` is a demo/CI heuristic, not a language model — quality
   claims apply to real providers.
 - Fragment-based (turn-taking) voice by design; no streaming/barge-in.
-
-## Provenance
-
-The UI began as an app scaffolded on the Base44 platform; this repo replaces
-that platform’s proprietary runtime (auth, serverless functions, hosted
-LLM/ASR/TTS) with the self-contained FastAPI + LangGraph + MCP backend
-described above. All agent logic, retrieval, tooling, and speech now run
-locally from this repository.

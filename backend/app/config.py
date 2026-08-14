@@ -39,6 +39,13 @@ def _get_int(name: str, default: int) -> int:
         return default
 
 
+def _get_float(name: str, default: float) -> float:
+    try:
+        return float(_get(name, str(default)))
+    except ValueError:
+        return default
+
+
 def _clamp(v: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, v))
 
@@ -99,6 +106,24 @@ class Settings:
     # ---- Retrieval ----
     RAG_TOP_K: int = _get_int("RAG_TOP_K", 8)
     CHROMA_COLLECTION: str = _get("CHROMA_COLLECTION", "products")
+
+    # Minimum similarity score (1/(1+distance), so 0-1) for a catalog row to
+    # count as a real match. Without a floor, vector search always returns its
+    # top_k nearest neighbours no matter how unrelated they are, and the
+    # answerer confidently recommends them — asking the sample cleaning catalog
+    # for an ice cream maker returned a stainless steel cleaner. When every row
+    # falls below the floor the result set is emptied, which routes the graph
+    # to the live web_fallback path instead of grounding on nothing.
+    # NOTE: re-tuned for the real Amazon-2020 curated slice (2.6k products).
+    # Unlike the 24-row cleaning sample, a broad general-merchandise catalog
+    # has no clean separation: on-topic queries bottom out at ~0.478 ("board
+    # game" -> a Kubb yard game) while the nearest off-topic neighbour reaches
+    # ~0.486 ("ice cream maker" -> an ice-pops maker toy) — both are arguably
+    # honest matches. The floor is therefore set to reject only genuinely
+    # unanswerable queries (mortgage rates ~0.38, prescription meds ~0.39,
+    # gaming laptop ~0.43) rather than to draw a topical boundary.
+    # Re-measure after re-slicing or switching EMBEDDINGS_PROVIDER; 0 disables.
+    RAG_MIN_SCORE: float = _get_float("RAG_MIN_SCORE", 0.45)
 
     # ---- Frontend origin (CORS, only needed if you bypass the Vite proxy) ----
     FRONTEND_ORIGIN: str = _get("FRONTEND_ORIGIN", "http://localhost:5173")

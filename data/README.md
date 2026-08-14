@@ -15,21 +15,52 @@ import kagglehub
 path = kagglehub.dataset_download("promptcloud/amazon-product-dataset-2020")
 ```
 
-For a local machine, download it yourself, then ingest a curated slice:
+### Local reproducibility (5 steps)
 
 ```bash
-# 1) download + unzip from Kaggle, put the CSV under data/raw/, e.g.:
-#    data/raw/marketing_sample_for_amazon_com-ecommerce__20200101_20200131__10k_data.csv
+# 1) credentials — Kaggle -> Settings -> API -> Create New API Token.
+#    NEVER commit kaggle.json or place it inside this repo.
+mv ~/Downloads/kaggle.json ~/.kaggle/kaggle.json && chmod 600 ~/.kaggle/kaggle.json
+#    (or: .venv/bin/kaggle auth login)
 
-# 2) build parquet files + the Chroma vector index (run from backend/)
+# 2) download into data/raw/ (gitignored). Prints the exact ingest command.
+bash scripts/fetch_amazon_2020.sh
+
+# 3) + 4) preprocess to parquet AND build the Chroma index, in one command
 cd backend
-python -m rag.ingest --csv ../data/raw/<the-kaggle-file>.csv \
-    --category "Household" --limit 3000
+python -m rag.ingest \
+    --csv "../data/raw/<the-kaggle-file>.csv" \
+    --max-per-category 500 --require-price --skip-uncategorized --require-real
+
+# 5) verify real data really is what got indexed (exit 0 = real)
+cd .. && python scripts/verify_index.py
 ```
 
-`--category` filters rows whose category column contains the substring
-(case-insensitive) — use it to pick the household/cleaning slice the brief
-suggests. `--limit` caps the index size for fast local builds.
+**Flags:**
+
+| Flag | Effect |
+|---|---|
+| `--max-per-category N` | caps each top-level category. The 2020 dump is 66.6% Toys & Games; without a cap a plain `--limit` yields ~77% toys |
+| `--require-price` | skips rows with no parseable price (they cannot be budget-filtered) |
+| `--skip-uncategorized` | skips the ~830 rows with a blank category |
+| `--require-real` | **final/demo mode** — aborts rather than producing an index that is not real Amazon data |
+| `--category SUBSTR` | substring filter on the category column. Note: `"Household"` matches almost nothing here — the relevant slice is `Home & Kitchen` |
+| `--limit N` | hard cap on total products |
+
+### Data source is always explicit
+
+`rag.ingest` prints an unmissable banner (`REAL AMAZON DATA` vs `SYNTHETIC
+SAMPLE DATA`), records `data_source` / `is_real_data` / `field_coverage` in
+`backend/storage/catalog_meta.json`, and the running API reports it at
+`GET /api/health` under `catalog`. `--require-real` makes a failed real-data
+ingest a hard error instead of a silent fallback to the sample catalog.
+
+### Known gaps in this dataset (verified, not assumed)
+
+The 2020 dump has **no rating column and no review text**, and its
+`Brand Name` and `Ingredients` columns are 100% empty. Ingest warns about each
+and records them in `missing_fields`. Ratings are not fabricated — anything
+depending on "highly rated" degrades to price/semantic ranking.
 
 ## Bundled sample (`sample_products.csv`)
 

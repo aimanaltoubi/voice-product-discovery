@@ -267,6 +267,8 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                     "result_count": len(candidates),
                     "resolved_category": resp.get("resolved_category"),
                     "relaxations": resp.get("relaxations"),
+                    "relevance_floor": resp.get("relevance_floor"),
+                    "dropped_below_floor": resp.get("dropped_below_floor"),
                     "error": resp.get("error"),
                     "candidates": [_slim(c, keep_features=120) for c in candidates],
                     "rerank": rerank_info or None,

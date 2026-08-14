@@ -12,7 +12,7 @@ backend. No external platform dependencies — everything the agent does runs
 from this repository.
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aimanaltoubi/voice-product-discovery/blob/main/colab_launch.ipynb)
-*One-click cloud demo — no local setup. `colab_launch.ipynb`.
+Cloud demo no local setup is needed=
 
 **Try saying:**
 - *“Find me an eco-friendly stainless-steel cleaner under fifteen dollars.”* → private-catalog path

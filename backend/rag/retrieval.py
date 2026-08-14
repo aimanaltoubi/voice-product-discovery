@@ -117,6 +117,8 @@ def hybrid_search(
             relaxations.append(note)
 
     results: list[dict] = []
+    below_floor = 0
+    floor = settings.RAG_MIN_SCORE
     if res and res["ids"] and res["ids"][0]:
         for meta, dist in zip(res["metadatas"][0], res["distances"][0]):
             row = {
@@ -140,10 +142,27 @@ def hybrid_search(
                 continue
             results.append(row)
 
+    # Relevance gate: a nearest neighbour is not automatically a match. Chroma
+    # always hands back top_k rows however unrelated they are, so we judge the
+    # *best* one — if even that is below the floor, nothing in this catalog
+    # answers the question and the whole set is dropped. The graph reads the
+    # empty set as "no private match" and routes to the live web fallback
+    # instead of grounding an answer on unrelated products.
+    # The gate gets applied to the best row only, not row-by-row: once the top
+    # hit is a genuine match, its weaker neighbours are exactly what the
+    # comparison table is for.
+    if floor > 0 and results:
+        best = max(r["score"] for r in results)
+        if best < floor:
+            below_floor = len(results)
+            results = []
+
     return {
         "results": results,
         "resolved_category": resolved_cat,
         "relaxations": relaxations,
+        "relevance_floor": floor,
+        "dropped_below_floor": below_floor,
         "filters_applied": {
             "max_price": max_price, "category": category,
             "material": material, "eco_friendly": eco_friendly,

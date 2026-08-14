@@ -26,7 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app.config import MEDIA_DIR, RUN_LOGS_DIR, settings
+from app.config import MEDIA_DIR, RUN_LOGS_DIR, STORAGE_DIR, settings
 from graph.build import run_discovery
 from mcp_server.client import MCPToolClient
 from speech.asr import transcribe as asr_transcribe
@@ -86,7 +86,29 @@ async def health():
         "asr": settings.ASR_PROVIDER,
         "tts": settings.TTS_PROVIDER,
         "embeddings": settings.EMBEDDINGS_PROVIDER,
+        "catalog": _catalog_status(),
         "mcp_tools": app.state.mcp.tool_catalog,
+    }
+
+
+def _catalog_status() -> dict:
+    """Which catalog is actually serving rag.search — real Amazon data or the
+    synthetic sample. Surfaced so a demo can never silently run on sample data.
+    """
+    meta_path = STORAGE_DIR / "catalog_meta.json"
+    if not meta_path.exists():
+        return {"data_source": "none", "is_real_data": False,
+                "detail": "index not built — run rag.ingest"}
+    try:
+        meta = json.loads(meta_path.read_text())
+    except Exception as e:
+        return {"data_source": "unreadable", "is_real_data": False, "detail": str(e)}
+    return {
+        "data_source": meta.get("data_source", "unknown"),
+        "is_real_data": bool(meta.get("is_real_data")),
+        "count": meta.get("count"),
+        "source_file": meta.get("source_file"),
+        "missing_fields": meta.get("missing_fields", []),
     }
 
 

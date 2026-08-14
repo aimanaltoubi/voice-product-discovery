@@ -42,7 +42,12 @@ COLUMN_CANDIDATES: dict[str, list[str]] = {
     "price": ["price", "Selling Price", "List Price", "selling_price"],
     "rating": ["rating", "Average Rating", "stars", "average_review_rating"],
     "features": ["features", "About Product", "about_product", "Product Description", "description"],
-    "ingredients": ["ingredients", "Product Specification", "product_specification"],
+    # True ingredient lists only. `Product Specification` used to live here, but
+    # it holds shipping weight / ASIN / sales-rank text, which the comparison
+    # table renders under an "Ingredients" heading. It feeds `specs` instead:
+    # useful as embedding signal, wrong as a displayed ingredient list.
+    "ingredients": ["ingredients", "Ingredients"],
+    "specs": ["Product Specification", "product_specification", "Technical Details"],
     "reviews": ["review_snippets", "reviews", "Customer Reviews", "customer_reviews"],
 }
 
@@ -100,25 +105,90 @@ def parse_size_oz(text: str) -> float | None:
 
 
 def _first_price(value) -> float | None:
+    """Parse the Kaggle `Selling Price` column, which is not clean currency.
+
+    Real values seen in the 2020 dump include ranges ("$74.99 - $249.99"),
+    space-split cents ("$ 19 99 $39.95"), and rows where Amazon's price-legal
+    CSS leaked into the cell. Anchoring on `$` and requiring cents keeps the
+    naive "first number anywhere" match from reading "$ 19 99" as 19.0 or
+    picking up a stray pixel value out of the embedded stylesheet.
+    """
     if value is None:
         return None
-    m = re.search(r"(\d{1,5}(?:\.\d{1,2})?)", str(value).replace(",", ""))
-    return float(m.group(1)) if m else None
+    s = str(value).replace(",", "")
+    # Cut everything from the first CSS/HTML artefact onward.
+    s = re.split(r"[{#]|margin-|text-decoration", s, maxsplit=1)[0]
+    # "$ 19 99" -> "$19.99"  (dollars and cents split by whitespace)
+    s = re.sub(r"\$\s*(\d{1,5})\s+(\d{2})\b(?!\s*\.)", r"$\1.\2", s)
+    # "$ 6 . 94" -> "$6.94"
+    s = re.sub(r"\$\s*(\d{1,5})\s*\.\s*(\d{1,2})\b", r"$\1.\2", s)
+    prices = [float(m) for m in re.findall(r"\$\s*(\d{1,5}(?:\.\d{1,2})?)", s)]
+    if not prices:
+        # No currency marker at all — fall back to a bare number.
+        m = re.search(r"\b(\d{1,5}(?:\.\d{1,2})?)\b", s)
+        return float(m.group(1)) if m else None
+    # For a range ("$74.99 - $249.99") the low end is the honest asking price.
+    return min(prices)
+
+
+def _fill_pct(df: pd.DataFrame, col: str) -> float:
+    """Percentage of rows where `col` holds actual text.
+
+    Uses fillna() rather than astype(str): under pandas 3's Arrow-backed string
+    dtype an all-null column survives astype(str) as NaN (not the literal
+    "nan"), so a naive `!= ""` test counts every null row as populated — which
+    reported the blank `Brand Name` column as 100% full.
+    """
+    if col not in df.columns:
+        return 0.0
+    filled = int((df[col].fillna("").astype("string").str.strip() != "").sum())
+    return round(100.0 * filled / max(len(df), 1), 1)
 
 
 def _pick(df: pd.DataFrame, field: str) -> str | None:
+    """Resolve a target field to a real column.
+
+    Candidates are tried in order, but a column that exists and is *entirely
+    empty* is skipped rather than claimed: the Kaggle 2020 file ships a blank
+    `Ingredients` column that would otherwise shadow `Product Specification`
+    (83.7% populated) purely because it is listed first.
+    """
     lower = {c.lower(): c for c in df.columns}
+    fallback: str | None = None
     for cand in COLUMN_CANDIDATES[field]:
-        if cand.lower() in lower:
-            return lower[cand.lower()]
-    return None
+        col = lower.get(cand.lower())
+        if col is None:
+            continue
+        if _fill_pct(df, col) > 0.0:
+            return col
+        if fallback is None:
+            fallback = col  # remember it, but keep looking for a populated one
+    return fallback
 
 
-def load_and_normalize(csv_path: Path, category_filter: str | None, limit: int | None) -> tuple[pd.DataFrame, pd.DataFrame]:
+def load_and_normalize(
+    csv_path: Path,
+    category_filter: str | None,
+    limit: int | None,
+    max_per_category: int | None = None,
+    require_price: bool = False,
+    skip_uncategorized: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     df = pd.read_csv(csv_path, dtype=str, on_bad_lines="skip", engine="python")
     cols = {f: _pick(df, f) for f in COLUMN_CANDIDATES}
     if not cols["title"]:
         raise SystemExit(f"Could not find a title column in {csv_path.name}. Columns: {list(df.columns)[:15]}")
+
+    # Which target fields this file can actually supply. Reported to the
+    # console and stored in catalog_meta.json so a missing field is a recorded
+    # fact rather than a silent None (the 2020 dump has no rating column at
+    # all, and its Brand Name / Ingredients columns are entirely blank).
+    coverage: dict[str, dict] = {}
+    for field, col in cols.items():
+        if col is None:
+            coverage[field] = {"column": None, "fill_pct": 0.0}
+        else:
+            coverage[field] = {"column": col, "fill_pct": _fill_pct(df, col)}
 
     def val(row, field):
         c = cols[field]
@@ -126,13 +196,28 @@ def load_and_normalize(csv_path: Path, category_filter: str | None, limit: int |
         return None if v is None or (isinstance(v, float) and pd.isna(v)) or str(v).lower() == "nan" else str(v).strip()
 
     products, reviews = [], []
+    per_cat: dict[str, int] = {}
     for _, row in df.iterrows():
         title = val(row, "title")
         if not title:
             continue
         category = val(row, "category") or "Uncategorized"
+        if skip_uncategorized and category == "Uncategorized":
+            continue
         if category_filter and category_filter.lower() not in (category + " " + title).lower():
             continue
+        # A product with no parseable price cannot take part in budget
+        # filtering or price comparison — the two things this app is for.
+        if require_price and _first_price(val(row, "price")) is None:
+            continue
+        # Curated slice: cap each top-level category so one section cannot
+        # swamp the index. Taking the first N rows of the 2020 dump yields
+        # ~77% Toys & Games; capping keeps real cross-category variety.
+        if max_per_category:
+            top = category.split("|")[0].strip() or "Uncategorized"
+            if per_cat.get(top, 0) >= max_per_category:
+                continue
+            per_cat[top] = per_cat.get(top, 0) + 1
         raw_id = val(row, "id") or title
         doc_id = raw_id if raw_id.startswith(("SAMPLE-", "AMZ2020-")) else \
             "AMZ2020-" + hashlib.sha1(raw_id.encode()).hexdigest()[:10]
@@ -144,6 +229,7 @@ def load_and_normalize(csv_path: Path, category_filter: str | None, limit: int |
             rating = min(float(m.group(1)), 5.0) if m else None
         features = (val(row, "features") or "")[:1200]
         ingredients = (val(row, "ingredients") or "")[:800]
+        specs = (val(row, "specs") or "")[:600]
         snippets = (val(row, "reviews") or "")[:800]
         blob = f"{title} {features} {ingredients}".lower()
         size_oz = parse_size_oz(f"{title} {features}")
@@ -151,7 +237,7 @@ def load_and_normalize(csv_path: Path, category_filter: str | None, limit: int |
             "id": doc_id, "doc_id": doc_id, "title": title,
             "brand": val(row, "brand") or "Unknown", "category": category,
             "price": price, "rating": rating, "features": features,
-            "ingredients": ingredients,
+            "ingredients": ingredients, "specs": specs,
             "eco_friendly": is_eco_friendly(blob),
             "size_oz": size_oz,
             "price_per_oz": round(price / size_oz, 4) if price and size_oz else None,
@@ -161,10 +247,10 @@ def load_and_normalize(csv_path: Path, category_filter: str | None, limit: int |
             reviews.append({"product_id": doc_id, "stars": rating, "summary": sn})
         if limit and len(products) >= limit:
             break
-    return pd.DataFrame(products), pd.DataFrame(reviews)
+    return pd.DataFrame(products), pd.DataFrame(reviews), coverage
 
 
-def build_index(products: pd.DataFrame) -> None:
+def build_index(products: pd.DataFrame, provenance: dict | None = None) -> None:
     import chromadb
 
     embedder = get_embedder()
@@ -181,9 +267,12 @@ def build_index(products: pd.DataFrame) -> None:
         # Embedding text per brief: title + features + selected review snippets
         # (+ ingredients). Stored lowercased so where_document $contains
         # matching is case-insensitive; display fields live in metadata.
+        # title + features/description + product details (+ ingredients and any
+        # review text when the source actually provides them).
         docs.append(
             f"{p['title']} | {p['brand']} | {p['category']} | "
-            f"{p['features']} | {p['ingredients']} | {p['review_snippets']}".lower()[:4000]
+            f"{p['features']} | {p['ingredients']} | {p.get('specs', '')} | "
+            f"{p['review_snippets']}".lower()[:4000]
         )
         meta = {
             "doc_id": p["doc_id"], "title": p["title"], "brand": p["brand"],
@@ -204,11 +293,13 @@ def build_index(products: pd.DataFrame) -> None:
                 metadatas=metas[i : i + B], embeddings=embs)
         print(f"  indexed {min(i + B, len(ids))}/{len(ids)}", file=sys.stderr)
 
-    (CHROMA_DIR.parent / "catalog_meta.json").write_text(json.dumps({
+    meta = {
         "embedder": embedder.name,
         "count": len(ids),
         "categories": sorted(products["category"].dropna().unique().tolist()),
-    }, indent=2))
+    }
+    meta.update(provenance or {})
+    (CHROMA_DIR.parent / "catalog_meta.json").write_text(json.dumps(meta, indent=2))
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -218,16 +309,63 @@ def main(argv: list[str] | None = None) -> None:
     src.add_argument("--csv", type=Path, help="path to the Kaggle Amazon 2020 CSV")
     ap.add_argument("--category", default=None, help="substring filter, e.g. 'Household' (curated slice)")
     ap.add_argument("--limit", type=int, default=None, help="max products to index")
+    ap.add_argument("--max-per-category", type=int, default=None,
+                    help="cap products per top-level category (curated slice; keeps variety)")
+    ap.add_argument("--require-real", action="store_true",
+                    help="final/demo mode: abort unless this run indexes real Amazon data")
+    ap.add_argument("--require-price", action="store_true",
+                    help="skip rows with no parseable price (they cannot be budget-filtered)")
+    ap.add_argument("--skip-uncategorized", action="store_true",
+                    help="skip rows whose category column is blank")
     args = ap.parse_args(argv)
+
+    if args.sample and args.require_real:
+        raise SystemExit(
+            "REFUSING TO BUILD: --require-real was passed with --sample.\n"
+            "Final mode expects the real Amazon Product Dataset 2020, not the "
+            "synthetic sample catalog. Pass --csv <kaggle file> instead."
+        )
 
     csv_path = DATA_DIR / "sample_products.csv" if args.sample else args.csv
     if not csv_path.exists():
         raise SystemExit(f"CSV not found: {csv_path}")
 
     print(f"Loading {csv_path} ...", file=sys.stderr)
-    products, reviews = load_and_normalize(csv_path, args.category, args.limit)
+    products, reviews, coverage = load_and_normalize(
+        csv_path, args.category, args.limit, args.max_per_category,
+        args.require_price, args.skip_uncategorized,
+    )
     if products.empty:
         raise SystemExit("No products matched — check --category / the CSV columns.")
+
+    # ---- data-source provenance -------------------------------------------
+    # The Colab flow could previously fall back to the sample catalog on error,
+    # leaving an index that looked real. The source is now recorded in
+    # catalog_meta.json and printed as an unmissable banner.
+    is_sample = bool(args.sample)
+    real_ids = int(products["doc_id"].str.startswith("AMZ2020-").sum())
+    if not is_sample and real_ids == 0:
+        raise SystemExit(
+            "REFUSING TO BUILD: --csv was given but no AMZ2020-* ids were produced.\n"
+            "The id column did not resolve — check the CSV schema."
+        )
+
+    missing = [f for f, c in coverage.items() if c["column"] is None or c["fill_pct"] == 0.0]
+    provenance = {
+        "data_source": "synthetic-sample" if is_sample else "amazon-product-dataset-2020",
+        "is_real_data": not is_sample,
+        "source_file": csv_path.name,
+        "source_rows_indexed": int(len(products)),
+        "slice": {
+            "category_filter": args.category,
+            "limit": args.limit,
+            "max_per_category": args.max_per_category,
+            "require_price": args.require_price,
+            "skip_uncategorized": args.skip_uncategorized,
+        },
+        "field_coverage": coverage,
+        "missing_fields": missing,
+    }
 
     products.to_parquet(PROCESSED_DIR / "products.parquet", index=False)
     if not reviews.empty:
@@ -235,8 +373,21 @@ def main(argv: list[str] | None = None) -> None:
     print(f"Wrote {len(products)} products -> {PROCESSED_DIR/'products.parquet'}", file=sys.stderr)
 
     print(f"Building Chroma index with embedder '{settings.EMBEDDINGS_PROVIDER}' ...", file=sys.stderr)
-    build_index(products)
-    print("Done. Index at", CHROMA_DIR, file=sys.stderr)
+    build_index(products, provenance)
+
+    banner = "SYNTHETIC SAMPLE DATA" if is_sample else "REAL AMAZON DATA"
+    bar = "=" * 66
+    print(f"\n{bar}\n  DATA SOURCE: {banner}\n"
+          f"  {len(products)} products indexed from {csv_path.name}\n{bar}", file=sys.stderr)
+    for field in ("rating", "reviews", "brand", "ingredients"):
+        c = coverage.get(field) or {}
+        if c.get("column") is None:
+            print(f"  WARNING: no '{field}' column in this dataset — "
+                  f"'{field}' will be absent from every record.", file=sys.stderr)
+        elif c.get("fill_pct") == 0.0:
+            print(f"  WARNING: column '{c['column']}' (-> {field}) is 100% empty — "
+                  f"'{field}' will be absent from every record.", file=sys.stderr)
+    print(f"{bar}\nDone. Index at {CHROMA_DIR}", file=sys.stderr)
 
 
 if __name__ == "__main__":

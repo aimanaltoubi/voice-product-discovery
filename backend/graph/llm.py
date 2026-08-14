@@ -86,6 +86,24 @@ _SAFETY_PATTERNS = [
 ]
 _LIVE_PATTERNS = r"\b(current|latest|right now|today|in stock|availability|available now|live price)\b"
 
+# Category nouns, matched on word boundaries. A bare `"clean" in transcript`
+# substring test also fires on "easy to clean", which made every appliance
+# request ("an ice cream maker that's easy to clean") get filtered down to
+# cleaning products.
+_CATEGORY_NOUNS = re.compile(
+    r"\b(?:cleaner|cleaners|cleanser|cleaning\s+(?:product|spray|solution|supplies)"
+    r"|detergent|degreaser|polish|disinfectant|dish\s+soap|wipes)\b"
+)
+# "easy to clean", "simple-to-clean", "hard to clean" describe a product's
+# upkeep, not the category being shopped for. Stripped before matching.
+_CLEAN_ATTRIBUTE = re.compile(
+    r"\b(?:easy|simple|quick|hard|difficult|effortless)[\s-]*(?:to[\s-]*)?clean\w*\b"
+)
+
+
+def _infer_category(text: str) -> str | None:
+    return "cleaner" if _CATEGORY_NOUNS.search(_CLEAN_ATTRIBUTE.sub(" ", text)) else None
+
 
 def _parse_budget(text: str) -> float | None:
     m = re.search(r"(?:under|below|less than|max(?:imum)?|up to)\s*\$?\s*(\d+(?:\.\d{1,2})?)", text)
@@ -114,7 +132,7 @@ def _mock_structured(schema: Type[T], ctx: dict[str, Any]) -> T:
                 "budget": _parse_budget(t),
                 "material": material,
                 "brand": None,
-                "category": "cleaner" if "clean" in t else None,
+                "category": _infer_category(t),
                 "eco_friendly": bool(re.search(r"\b(eco|green|natural|plant[- ]based|non[- ]toxic)\b", t)) or None,
             },
             safety_flags=flags,
@@ -136,13 +154,23 @@ def _mock_structured(schema: Type[T], ctx: dict[str, Any]) -> T:
         )
     if name == "RerankOutput":
         cands = ctx.get("candidates") or []
-        ranked = sorted(
-            cands,
-            key=lambda p: (-(p.get("rating") or 0), p.get("price") or 1e9),
-        )
+        # Rating-first ranking only works when the catalog actually has ratings.
+        # The Amazon-2020 dump has no rating column, so `-(rating or 0)` ties
+        # every row at 0 and silently degrades to cheapest-first — which put a
+        # 14-piece toddler puzzle above 1000-piece ones for "challenging for
+        # adults". With no ratings anywhere, semantic score is the honest
+        # signal: it is what encodes the qualitative part of the request.
+        has_ratings = any(isinstance(p.get("rating"), (int, float)) for p in cands)
+        if has_ratings:
+            ranked = sorted(cands, key=lambda p: (-(p.get("rating") or 0), p.get("price") or 1e9))
+            rationale = "[mock] Ranked by rating (desc) then price (asc) within the applied filters."
+        else:
+            ranked = sorted(cands, key=lambda p: -(p.get("score") or 0))
+            rationale = ("[mock] No ratings in this catalog — ranked by semantic "
+                         "relevance (retrieval score) within the applied filters.")
         return schema(
             ranked_doc_ids=[p["doc_id"] for p in ranked[:3]],
-            rationale="[mock] Ranked by rating (desc) then price (asc) within the applied filters.",
+            rationale=rationale,
         )
     if name == "AnswerOutput":
         picks = ctx.get("top_picks") or []
@@ -158,8 +186,13 @@ def _mock_structured(schema: Type[T], ctx: dict[str, Any]) -> T:
         return schema(
             spoken_answer=(
                 f"My top pick is {top.get('title')} by {top.get('brand') or 'an unbranded maker'} — "
-                f"{rating}, typically {price}. I compared {len(picks)} options against your criteria; "
-                "details and sources are on your screen. Would you like the most affordable or the highest rated?"
+                f"{rating}, typically {price}. "
+                + (
+                    "It was the only option matching your criteria; "
+                    if len(picks) == 1
+                    else f"I compared {len(picks)} options against your criteria; "
+                )
+                + "details and sources are on your screen. Would you like the most affordable or the highest rated?"
             ),
             top_pick_doc_id=top["doc_id"],
             citation_doc_ids=[p["doc_id"] for p in picks],

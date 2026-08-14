@@ -7,7 +7,15 @@ The brief specifies the **Amazon Product Dataset 2020** slice from Kaggle:
 > https://www.kaggle.com/datasets/promptcloud/amazon-product-dataset-2020
 
 That dataset is **not redistributed in this repo** (Kaggle datasets carry
-their own licenses). Download it yourself, then ingest a curated slice:
+their own licenses). The Colab walkthrough downloads it automatically at
+run time via `kagglehub` (public dataset, no account needed):
+
+```python
+import kagglehub
+path = kagglehub.dataset_download("promptcloud/amazon-product-dataset-2020")
+```
+
+For a local machine, download it yourself, then ingest a curated slice:
 
 ```bash
 # 1) download + unzip from Kaggle, put the CSV under data/raw/, e.g.:

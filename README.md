@@ -176,16 +176,3 @@ LLM via env (`graph/llm.py`); `.env.example` + `run.sh`; safety
 | TTS error mentioning `speech.platform.bing.com` | Your network blocks Edge TTS; set `TTS_PROVIDER=openai`. |
 | `web.search` returns zero results | DuckDuckGo throttling or offline; results degrade gracefully (the step log shows the error). Configure Serper/Brave/Tavily keys for reliability. |
 | Mic button does nothing | Browsers require `localhost` or HTTPS for `getUserMedia`; use the Vite URL, not a LAN IP. |
-
-## Limitations (honest ones for the demo)
-
-- The eco/material/category metadata comes from keyword heuristics over
-  messy catalog text (with basic negation handling) — good enough for the
-  demo slice, not production taxonomy.
-- Web rows have no SKUs, so reconciliation is title/brand-similarity based;
-  snippet price parsing is regex-level.
-- DuckDuckGo (keyless default) rate-limits aggressively; paid search APIs
-  behave better.
-- `LLM_PROVIDER=mock` is a demo/CI heuristic, not a language model — quality
-  claims apply to real providers.
-- Fragment-based (turn-taking) voice by design; no streaming/barge-in.

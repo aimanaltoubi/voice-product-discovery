@@ -20,6 +20,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any, Literal
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -66,8 +67,26 @@ app.mount("/media", StaticFiles(directory=str(MEDIA_DIR)), name="media")
 # schemas
 # --------------------------------------------------------------------------
 
+class SearchContext(BaseModel):
+    """The client-held search session carried between refinements.
+
+    Kept in the browser rather than server-side: this is shopping-query state
+    for one demo session, so a dict on the request is enough — no store, no
+    session table, nothing to expire or clean up.
+    """
+    constraints: dict[str, Any] = Field(default_factory=dict)
+    top_k: int | None = None
+    needs_live: bool = False
+    changes: list[str] = Field(default_factory=list)
+
+
 class DiscoverRequest(BaseModel):
     transcript: str = Field(min_length=1, max_length=2000)
+    # "new"    — ignore any context, fresh session
+    # "refine" — parse this utterance and merge onto search_context
+    # "apply"  — use search_context.constraints verbatim (client edited them)
+    mode: Literal["new", "refine", "apply"] = "new"
+    search_context: SearchContext | None = None
 
 
 class SpeakRequest(BaseModel):
@@ -134,7 +153,11 @@ async def transcribe(audio: UploadFile = File(...)):
 async def discover(req: DiscoverRequest):
     started = time.perf_counter()
     try:
-        payload = await run_discovery(req.transcript.strip(), app.state.mcp)
+        ctx = (req.search_context.model_dump()
+               if req.mode in ("refine", "apply") and req.search_context else None)
+        payload = await run_discovery(req.transcript.strip(), app.state.mcp,
+                                      search_context=ctx,
+                                      apply_only=(req.mode == "apply"))
     except Exception as e:
         log.exception("Discovery pipeline failed")
         raise HTTPException(status_code=500, detail=f"Discovery failed: {e}") from e

@@ -67,12 +67,33 @@ def _graph_for(mcp: MCPToolClient):
     return _compiled_cache[key]
 
 
-async def run_discovery(transcript: str, mcp: MCPToolClient) -> dict[str, Any]:
-    """Run the full pipeline and shape the response for the frontend."""
+async def run_discovery(
+    transcript: str,
+    mcp: MCPToolClient,
+    *,
+    search_context: dict[str, Any] | None = None,
+    apply_only: bool = False,
+) -> dict[str, Any]:
+    """Run the full pipeline and shape the response for the frontend.
+
+    `search_context` is the client-held search session: the constraints already
+    accumulated. When present this run is a refinement — the router merges the
+    new utterance onto them and the whole catalog is searched again with the
+    combined intent.
+    """
     graph = _graph_for(mcp)
-    final: DiscoveryState = await graph.ainvoke(
-        {"transcript": transcript, "steps": []}
-    )
+    initial: dict[str, Any] = {"transcript": transcript, "steps": []}
+    if search_context:
+        prior = search_context.get("constraints") or {}
+        if prior:
+            initial["prior_constraints"] = prior
+        if search_context.get("top_k"):
+            initial["prior_top_k"] = search_context["top_k"]
+        if apply_only:
+            initial["apply_only"] = True
+            initial["prior_needs_live"] = bool(search_context.get("needs_live"))
+            initial["applied_changes"] = search_context.get("changes") or []
+    final: DiscoveryState = await graph.ainvoke(initial)
 
     answer = final.get("answer") or {}
     picks = final.get("top_picks") or []
@@ -146,6 +167,13 @@ async def run_discovery(transcript: str, mcp: MCPToolClient) -> dict[str, Any]:
         "understood": (final.get("router") or {}).get("constraints") or {},
         "top_k": (final.get("router") or {}).get("top_k"),
         "needs_live": bool((final.get("router") or {}).get("needs_live")),
+        # The search session to echo back to the client for the next refinement.
+        "search_context": {
+            "constraints": (final.get("router") or {}).get("constraints") or {},
+            "top_k": (final.get("router") or {}).get("top_k"),
+        },
+        "search_query": final.get("effective_query") or transcript,
+        "constraint_changes": final.get("constraint_changes") or [],
         # Present only when a hard constraint eliminated every candidate.
         "no_match": final.get("no_match"),
     }

@@ -21,7 +21,15 @@ from typing_extensions import TypedDict
 # --------------------------------------------------------------------------
 
 class DiscoveryState(TypedDict, total=False):
-    transcript: str
+    transcript: str                   # the latest utterance only
+    # --- search session (refinement) ---
+    prior_constraints: dict[str, Any]  # merged constraints carried in by the client
+    prior_top_k: int
+    apply_only: bool                   # use prior_constraints verbatim, skip extraction
+    prior_needs_live: bool
+    applied_changes: list[str]
+    effective_query: str              # accumulated intent -> the actual search text
+    constraint_changes: list[str]      # what this refinement changed
     router: dict[str, Any]            # RouterOutput.model_dump()
     plan: dict[str, Any]              # PlanOutput.model_dump() + enforcement notes
     candidates: list[dict[str, Any]]  # raw rag.search rows

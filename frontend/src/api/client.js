@@ -23,12 +23,22 @@ export async function transcribe(blob) {
   return handle(res);
 }
 
-/** POST transcript -> full discovery result (steps, spoken_answer, table, citations) */
-export async function discover(transcript) {
+/**
+ * POST transcript -> full discovery result (steps, spoken_answer, table, citations).
+ *
+ * `searchContext` carries the active search session. When supplied the request
+ * is a refinement: the backend merges this utterance onto the accumulated
+ * constraints and searches the whole catalog again with the combined intent.
+ */
+export async function discover(transcript, searchContext = null, mode = null) {
   const res = await fetch(`${API_BASE}/api/discover`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ transcript })
+    body: JSON.stringify({
+      transcript,
+      mode: mode || (searchContext ? 'refine' : 'new'),
+      ...(searchContext ? { search_context: searchContext } : {})
+    })
   });
   return handle(res);
 }

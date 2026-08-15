@@ -96,10 +96,19 @@ function ProductCard({ row, rank, isTop, isAlt, requested }) {
         <ProductImage src={row.image} alt={row.title} />
 
         <div className="min-w-0 flex-1">
-          {isTop && !isAlt && (
-            <span className="mb-1.5 inline-block rounded bg-slate-900 px-1.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-white">
-              Top pick
-            </span>
+          {/* Ranking is the backend's; rank 1 gets the filled badge and the
+              rest a quiet label so the hierarchy reads at a glance without
+              three competing badges. */}
+          {!isAlt && (
+            isTop ? (
+              <span className="mb-1.5 inline-block rounded bg-slate-900 px-1.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-white">
+                Top pick
+              </span>
+            ) : (
+              <span className="mb-1.5 block text-[10.5px] font-medium uppercase tracking-wide text-slate-400">
+                Option {rank}
+              </span>
+            )
           )}
 
           <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">

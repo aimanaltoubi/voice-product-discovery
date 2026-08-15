@@ -6,7 +6,7 @@ import React from 'react';
  * these no longer need to restate the product type. Nothing here filters the
  * current result list; every click reruns full-catalog retrieval.
  */
-export default function RefineActions({ understood, onRefine }) {
+export default function RefineActions({ understood, onRefine, disabled = false }) {
   if (!understood?.product_type || !onRefine) return null;
 
   const budget = understood.budget;
@@ -50,8 +50,11 @@ export default function RefineActions({ understood, onRefine }) {
           <button
             key={a.label}
             type="button"
+            // Disabled while a request is in flight — these each trigger a full
+            // pipeline run, so a double-click would fire two searches.
+            disabled={disabled}
             onClick={() => onRefine(a.query)}
-            className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-[13px] font-medium text-slate-700 transition-colors hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+            className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-[13px] font-medium text-slate-700 transition-colors hover:border-slate-400 hover:bg-slate-50 hover:text-slate-900 active:bg-slate-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-slate-300 disabled:hover:bg-white"
           >
             {a.label}
           </button>

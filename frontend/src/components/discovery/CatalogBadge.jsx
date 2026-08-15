@@ -7,16 +7,18 @@ import { health } from '@/api/client';
  * (backed by backend/storage/catalog_meta.json). Sample data is never allowed
  * to look like the real Amazon catalog.
  */
-export default function CatalogBadge() {
-  const [catalog, setCatalog] = useState(null);
+export default function CatalogBadge({ catalog: provided }) {
+  const [fetched, setFetched] = useState(null);
+  const catalog = provided ?? fetched;
 
   useEffect(() => {
+    if (provided) return;            // parent already has it — don't refetch
     let alive = true;
     health()
-      .then((h) => alive && setCatalog(h.catalog))
+      .then((h) => alive && setFetched(h.catalog))
       .catch(() => {});
     return () => { alive = false; };
-  }, []);
+  }, [provided]);
 
   if (!catalog || catalog.data_source === 'none') return null;
 

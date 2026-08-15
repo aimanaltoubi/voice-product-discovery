@@ -29,6 +29,7 @@ def build_graph(mcp: MCPToolClient):
 
     g.add_node("router", nodes["router"])
     g.add_node("safety", nodes["safety"])
+    g.add_node("clarify", nodes["clarify"])
     g.add_node("planner", nodes["planner"])
     g.add_node("retrieve", nodes["retrieve"])
     g.add_node("web_compare", nodes["web_compare"])
@@ -39,9 +40,10 @@ def build_graph(mcp: MCPToolClient):
     g.set_entry_point("router")
     g.add_conditional_edges(
         "router", nodes["route_after_router"],
-        {"safety": "safety", "planner": "planner"},
+        {"safety": "safety", "clarify": "clarify", "planner": "planner"},
     )
     g.add_edge("safety", END)
+    g.add_edge("clarify", END)
     g.add_edge("planner", "retrieve")
     g.add_conditional_edges(
         "retrieve", nodes["route_after_retrieve"],
@@ -85,6 +87,12 @@ async def run_discovery(transcript: str, mcp: MCPToolClient) -> dict[str, Any]:
             "ingredients": p.get("ingredients"),
             "features": p.get("features"),
             "url": p.get("url"),
+            # Amazon CDN URL from this product's own dataset row (never inferred).
+            "image": p.get("image"),
+            # Evidence-backed "why this product" data (graph/nodes.py:match_evidence).
+            "match_reasons": p.get("match_reasons") or [],
+            "matched_constraints": p.get("matched_constraints"),
+            "supported_constraints": p.get("supported_constraints"),
         }
         for p in picks
     ]
@@ -132,4 +140,12 @@ async def run_discovery(transcript: str, mcp: MCPToolClient) -> dict[str, Any]:
         "citations": citations,
         "blocked": bool(final.get("blocked")),
         "source": final.get("mode", "private"),
+        # Set when the request was too broad; UI shows the single question.
+        "clarify": final.get("clarify"),
+        # What the router understood — drives the "What I understood" panel.
+        "understood": (final.get("router") or {}).get("constraints") or {},
+        "top_k": (final.get("router") or {}).get("top_k"),
+        "needs_live": bool((final.get("router") or {}).get("needs_live")),
+        # Present only when a hard constraint eliminated every candidate.
+        "no_match": final.get("no_match"),
     }

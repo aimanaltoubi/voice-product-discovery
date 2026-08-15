@@ -42,3 +42,9 @@ export async function speak(text) {
   });
   return handle(res);
 }
+
+/** GET provider + catalog status -> { llm, catalog: {data_source, is_real_data, count, ...} } */
+export async function health() {
+  const res = await fetch(`${API_BASE}/api/health`);
+  return handle(res);
+}

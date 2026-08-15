@@ -134,6 +134,7 @@ def hybrid_search(
                 "eco_friendly": meta.get("eco_friendly"),
                 "size_oz": meta.get("size_oz"),
                 "price_per_oz": meta.get("price_per_oz"),
+                "image": meta.get("image"),
                 "score": round(1.0 / (1.0 + float(dist)), 4),
             }
             # Python-side price guard for the fully-relaxed attempt.

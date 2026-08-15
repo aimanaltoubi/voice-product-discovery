@@ -155,7 +155,10 @@ async def run_discovery(
     return {
         "transcript": transcript,
         "steps": final.get("steps", []),
+        # spoken_answer is what TTS reads (short); answer_detail is the fuller
+        # on-screen text. The UI shows detail and speaks spoken_answer.
         "spoken_answer": answer.get("spoken_answer", ""),
+        "answer_detail": answer.get("answer_detail") or answer.get("spoken_answer", ""),
         "top_pick": top_pick,
         "comparison_table": comparison_table,
         "citations": citations,
@@ -174,6 +177,9 @@ async def run_discovery(
         },
         "search_query": final.get("effective_query") or transcript,
         "constraint_changes": final.get("constraint_changes") or [],
+        # Catalog<->live matches, so the comparison view can show live price /
+        # availability beside the catalog price without re-deriving anything.
+        "reconciliation": final.get("reconciliation"),
         # Present only when a hard constraint eliminated every candidate.
         "no_match": final.get("no_match"),
     }

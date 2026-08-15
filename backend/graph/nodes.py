@@ -258,6 +258,68 @@ def _titlecase(phrase: str) -> str:
     return phrase[:1].upper() + phrase[1:]
 
 
+# --- private <-> live product matching -------------------------------------
+# Full-string similarity fails here: a 130-char Amazon catalog title and a
+# 55-char search-result title describe the same product but score ~0.37 purely
+# on length mismatch. Matching on distinctive tokens instead — the words that
+# actually identify a product ("prima ballerina") rather than the ones every
+# row in the category shares ("comforter", "set", "twin").
+_SITE_BOILERPLATE = {
+    "amazon", "amazoncom", "com", "www", "walmart", "target", "ebay", "wayfair",
+    "overstock", "home", "kitchen", "buy", "online", "shop", "sale", "deals",
+    "best", "price", "prices", "free", "shipping", "official", "site", "store",
+    "reviews", "review", "new", "the", "and", "for", "with", "your",
+}
+# Category/spec words: real, but shared by every product in the category, so
+# overlap on these alone is not evidence that two rows are the same product.
+_GENERIC_PRODUCT_TOKENS = {
+    "comforter", "comforters", "set", "sets", "bed", "bedding", "sheet", "sheets",
+    "quilt", "duvet", "cover", "blanket", "pillow", "sham", "shams", "bag",
+    "backpack", "bottle", "water", "piece", "pieces", "pc", "pcs", "count",
+    "twin", "full", "queen", "king", "xl", "size", "sized", "inch", "inches",
+    "oz", "ounce", "pack", "kids", "kid", "boys", "girls", "adult", "teen",
+    "soft", "ultra", "super", "season", "all", "machine", "washable", "wash",
+    "microfiber", "polyester", "cotton", "alternative", "lightweight", "warm",
+    "color", "colors", "multi", "collection", "style", "design", "quality",
+}
+
+
+def _tokens(text: str) -> set[str]:
+    raw = re.split(r"[^a-z0-9]+", (text or "").lower())
+    return {t for t in raw if len(t) >= 3 and t not in _SITE_BOILERPLATE}
+
+
+def match_products(catalog_title: str, catalog_brand: str | None,
+                   web_title: str) -> tuple[bool, dict]:
+    """Decide whether a live result is the same product as a catalog row.
+
+    Returns (is_match, evidence) where evidence explains the decision so the
+    step log can show *why* two rows were linked rather than a bare number.
+    """
+    # "Unknown" is the ingest placeholder for this dataset's empty brand column;
+    # treating it as a token would match every brandless row to every other.
+    brand = (catalog_brand or "").strip().lower()
+    brand_text = brand if brand and brand != "unknown" else ""
+
+    a = _tokens(f"{catalog_title} {brand_text}")
+    b = _tokens(web_title)
+    if not a or not b:
+        return False, {"reason": "no comparable tokens"}
+
+    shared = a & b
+    distinctive = shared - _GENERIC_PRODUCT_TOKENS
+    containment = len(shared) / min(len(a), len(b))
+
+    # Two distinctive tokens in common, or one plus strong containment of the
+    # shorter title. Generic-only overlap never qualifies.
+    is_match = len(distinctive) >= 2 or (len(distinctive) == 1 and containment >= 0.6)
+    return is_match, {
+        "shared_tokens": sorted(shared),
+        "distinctive_tokens": sorted(distinctive),
+        "containment": round(containment, 2),
+    }
+
+
 def _money(v: Any) -> str:
     """'$50' rather than '$50.00' — chips read better without dead cents."""
     if not isinstance(v, (int, float)):
@@ -753,7 +815,15 @@ def build_nodes(mcp: MCPToolClient) -> dict:
     # ---- 5a. Web compare (live price/availability for the top pick) -------
     async def web_compare_node(state: dict) -> dict:
         top = state["top_picks"][0]
-        query = " ".join(x for x in [top.get("title"), top.get("brand"), "price"] if x)
+        # Placeholder values must never reach a live search: this dataset's
+        # brand column is empty, so ingest stores "Unknown" — searching for
+        # "Unknown Twin Comforter price" poisons the query.
+        brand = (top.get("brand") or "").strip()
+        if brand.lower() in ("unknown", "n/a", "na", "none", "null"):
+            brand = ""
+        # Long Amazon titles also hurt search recall; keep the leading phrase.
+        title = " ".join(str(top.get("title") or "").split()[:12])
+        query = " ".join(x for x in [title, brand, "price"] if x)
         args = {"query": query, "max_results": 5}
         resp = await mcp.call("web.search", args)
         web = {"mode": "compare", **resp}
@@ -832,21 +902,24 @@ def build_nodes(mcp: MCPToolClient) -> dict:
         matches: dict[str, Any] = {}
         flags: list[str] = []
         for pick in picks:
-            pick_key = _norm(f"{pick.get('title', '')} {pick.get('brand') or ''}")
-            best, best_ratio = None, 0.0
+            best, best_ev, best_score = None, None, -1.0
             for r in web_results:
-                ratio = difflib.SequenceMatcher(
-                    None, pick_key, _norm(r.get("title", ""))
-                ).ratio()
-                if ratio > best_ratio:
-                    best, best_ratio = r, ratio
-            if not best or best_ratio < 0.45:
+                ok, ev = match_products(pick.get("title", ""), pick.get("brand"),
+                                        r.get("title", ""))
+                if not ok:
+                    continue
+                # Rank accepted candidates by distinctive overlap, then containment.
+                score = len(ev["distinctive_tokens"]) + ev["containment"]
+                if score > best_score:
+                    best, best_ev, best_score = r, ev, score
+            if not best:
                 continue
             web_price = best.get("price") if isinstance(best.get("price"), (int, float)) \
                 else _price_from_text(best.get("snippet", ""), best.get("title", ""))
             entry: dict[str, Any] = {
-                "matched_by": "title/brand similarity (SKU-less web rows)",
-                "similarity": round(best_ratio, 2),
+                "matched_by": "distinctive-token overlap (SKU-less web rows)",
+                "distinctive_tokens": best_ev["distinctive_tokens"],
+                "containment": best_ev["containment"],
                 "web_title": best.get("title"),
                 "web_url": best.get("url"),
                 "web_price": web_price,
@@ -873,7 +946,8 @@ def build_nodes(mcp: MCPToolClient) -> dict:
             "steps": [step(
                 "reconcile",
                 {
-                    "method": "deterministic: normalized title+brand similarity >= 0.45; "
+                    "method": "deterministic: >=2 distinctive shared tokens (generic "
+                              "category words and 'Unknown' brand excluded); "
                               "price delta > 15% flagged",
                     "catalog_picks": [p.get("title") for p in picks],
                     "web_titles": [r.get("title") for r in web_results],
@@ -957,10 +1031,14 @@ def build_nodes(mcp: MCPToolClient) -> dict:
 
         # Critic duty: discrepancies must be surfaced in the spoken answer.
         flags = (reconciliation or {}).get("discrepancy_flags") or []
-        spoken = answer.get("spoken_answer", "")
-        if flags and not re.search(r"\b(differ|discrepan|changed|higher|lower)\w*", spoken, re.I):
-            answer["spoken_answer"] = spoken.rstrip() + " Note: the live web price differs from our catalog."
-            critic_notes.append("appended discrepancy notice (reconciliation flagged a price conflict)")
+        _voiced = re.compile(r"\b(differ|discrepan|changed|higher|lower)\w*", re.I)
+        if flags:
+            for field, note in (("spoken_answer", " Note: the live price differs from our catalog."),
+                                ("answer_detail", " Note: the live web price differs from the catalog price.")):
+                text = answer.get(field) or ""
+                if text and not _voiced.search(text):
+                    answer[field] = text.rstrip() + note
+                    critic_notes.append(f"appended discrepancy notice to {field}")
 
         return {
             "answer": answer,

@@ -138,8 +138,11 @@ class RerankOutput(BaseModel):
 class AnswerOutput(BaseModel):
     """Final grounded answer (prompts/answerer.md)."""
     spoken_answer: str = Field(
-        description="~40-word spoken summary ending with the "
-                    "affordable-vs-highest-rated follow-up question.")
+        description="20-30 word summary that is READ ALOUD (<=15s). No doc_ids, "
+                    "URLs, or full product titles.")
+    answer_detail: str = Field(
+        default="",
+        description="2-3 sentence on-screen explanation of the recommendation.")
     top_pick_doc_id: str = Field(
         default="", description="doc_id of the top pick; must exist in the rows.")
     citation_doc_ids: List[str] = Field(default_factory=list)

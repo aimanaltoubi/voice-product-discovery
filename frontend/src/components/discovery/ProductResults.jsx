@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Check, ExternalLink, ChevronDown, ChevronRight, ImageOff } from 'lucide-react';
+import { Check, ExternalLink, ChevronDown, ChevronRight, ImageOff, Minus } from 'lucide-react';
 
 /**
  * Recommended products.
@@ -54,9 +54,36 @@ function Chip({ children }) {
   );
 }
 
-function ProductCard({ row, rank, isTop, isAlt }) {
+/**
+ * Which requested preferences this product's evidence did NOT support.
+ *
+ * Derived only from data the backend already returned: the requested
+ * qualitative features and the chips match_evidence() actually granted. This
+ * can only ever *withhold* a claim, never add one. The backend's own
+ * matched/supported counts are authoritative — we show at most
+ * (supported − matched) items and nothing at all when the counts agree.
+ */
+function unverifiedFeatures(row, requested = []) {
+  const { matched_constraints: matched, supported_constraints: supported } = row;
+  if (typeof matched !== 'number' || typeof supported !== 'number') return [];
+  const gap = supported - matched;
+  if (gap <= 0) return [];
+  const chips = (row.match_reasons || []).join(' ').toLowerCase();
+  const words = (s) => s.toLowerCase().split(/[^a-z]+/).filter((w) => w.length >= 4);
+  const missing = requested.filter((f) => {
+    const ws = words(f);
+    if (!ws.length) return false;
+    // Verified if any significant word of the preference appears in a chip
+    // ("wash" matches the chip "Machine washable").
+    return !ws.some((w) => chips.includes(w.slice(0, Math.max(4, w.length - 2))));
+  });
+  return missing.slice(0, gap);
+}
+
+function ProductCard({ row, rank, isTop, isAlt, requested }) {
   const [open, setOpen] = useState(false);
   const reasons = row.match_reasons || [];
+  const unverified = unverifiedFeatures(row, requested);
   const { matched_constraints: matched, supported_constraints: supported } = row;
   const showBrand = row.brand && row.brand.toLowerCase() !== 'unknown';
   const showRating = typeof row.rating === 'number';
@@ -89,17 +116,27 @@ function ProductCard({ row, rank, isTop, isAlt }) {
             )}
           </div>
 
-          {reasons.length > 0 && (
-            <div className="mt-2.5 flex flex-wrap gap-1.5">
+          {(reasons.length > 0 || unverified.length > 0) && (
+            <div className="mt-3 flex flex-wrap items-center gap-1.5">
               {reasons.map((r) => <Chip key={r}>{r}</Chip>)}
+              {unverified.map((u) => (
+                <span
+                  key={u}
+                  title="The product listing does not mention this, so it is not claimed"
+                  className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-[12.5px] leading-none text-slate-500"
+                >
+                  <Minus className="h-3 w-3 shrink-0" aria-hidden="true" />
+                  {u} not verified
+                </span>
+              ))}
             </div>
           )}
 
           {typeof matched === 'number' && supported > 0 && (
-            <p className="mt-2 text-[12.5px] text-slate-500">
+            <p className="mt-2.5 text-[12.5px] text-slate-500">
               Matches{' '}
               <span className="font-medium text-slate-700">{matched} of {supported}</span>{' '}
-              supported criteria
+              preferences
             </p>
           )}
 
@@ -157,19 +194,21 @@ function ProductCard({ row, rank, isTop, isAlt }) {
   );
 }
 
-export default function ProductResults({ rows, variant = 'recommended' }) {
+export default function ProductResults({ rows, variant = 'recommended', requested = [] }) {
   if (!rows?.length) return null;
   const isAlt = variant === 'alternatives';
   return (
     <section className="space-y-3">
-      <h2 className="text-sm font-semibold text-slate-900">
-        {isAlt ? 'Closest alternatives' : 'Recommended for you'}
-      </h2>
-      {isAlt && (
-        <p className="-mt-1 text-[13px] text-slate-500">
-          These do <span className="font-medium">not</span> meet your stated criteria — shown for reference only.
+      <div>
+        <h2 className="text-[19px] font-semibold tracking-tight text-slate-900">
+          {isAlt ? 'Closest alternatives' : 'Recommended for you'}
+        </h2>
+        <p className="mt-0.5 text-[13px] text-slate-500">
+          {isAlt
+            ? 'These do not meet your stated criteria — shown for reference only.'
+            : `${rows.length} match${rows.length === 1 ? '' : 'es'} from the private catalog, best first.`}
         </p>
-      )}
+      </div>
       <ol className="space-y-3">
         {rows.map((r, i) => (
           <ProductCard
@@ -178,6 +217,7 @@ export default function ProductResults({ rows, variant = 'recommended' }) {
             rank={i + 1}
             isTop={i === 0}
             isAlt={isAlt}
+            requested={isAlt ? [] : requested}
           />
         ))}
       </ol>

@@ -150,30 +150,27 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-slate-50/60 text-slate-900 antialiased">
-      <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-3xl flex-wrap items-center justify-between gap-3 px-5 py-4 sm:px-6">
-          <div className="min-w-0">
-            <h1 className="text-[17px] font-semibold tracking-tight">Product Discovery</h1>
-            <p className="text-[13px] text-slate-500">Find products using voice or text</p>
-          </div>
-          <CatalogBadge />
-        </div>
-      </header>
+      <main className="mx-auto max-w-3xl space-y-6 px-5 py-8 sm:px-6 sm:py-10">
+        {/* Level 1 — the goal and the primary action */}
+        <header className={hasSession ? '' : 'pt-4 text-center'}>
+          <h1 className="text-[26px] font-semibold tracking-tight text-slate-900 sm:text-[30px]">
+            Find the right product
+          </h1>
+          <p className="mt-1.5 text-[15px] text-slate-500">
+            Describe what you're looking for, then refine until it fits.
+          </p>
+        </header>
 
-      <main className="mx-auto max-w-3xl space-y-5 px-5 py-6 sm:px-6 sm:py-8">
         <YourSearch
           session={session}
           onRemoveFeature={removeFeature}
           onReset={resetSession}
         />
 
-        {/* Input */}
-        <section className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5">
-          <label
-            htmlFor="query"
-            className="mb-2 block text-sm font-semibold text-slate-900"
-          >
-            {hasSession ? 'Refine your search' : 'What are you looking for?'}
+        {/* Search / refine input */}
+        <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+          <label htmlFor="query" className="sr-only">
+            {hasSession ? 'Refine your search' : 'Describe what you are looking for'}
           </label>
           <Textarea
             id="query"
@@ -181,21 +178,23 @@ export default function Home() {
             onChange={(e) => setTranscript(e.target.value)}
             placeholder={
               hasSession
-                ? 'e.g. Make it machine washable · Something lighter · Actually under $40'
-                : 'e.g. Recommend a soft, easy-to-wash comforter set for a twin bed under fifty dollars'
+                ? "Tell me what you'd change — e.g. something lighter, or under $40"
+                : "Soft twin comforter under $50 that's easy to wash…"
             }
-            className="min-h-[76px] resize-none border-slate-200 text-[15px] focus-visible:ring-slate-400"
+            className="min-h-[68px] resize-none border-slate-200 text-[15.5px] focus-visible:ring-slate-400"
           />
           <div className="mt-3 flex flex-wrap items-center gap-2.5">
             <Button
               onClick={() => runDiscovery()}
               disabled={!transcript.trim() || !!busy}
-              className="h-9 gap-2 rounded-lg bg-slate-900 px-4 text-[13.5px] font-medium text-white hover:bg-slate-800"
+              className="h-10 gap-2 rounded-lg bg-slate-900 px-5 text-[14px] font-medium text-white hover:bg-slate-800"
             >
               {busy === 'running'
-                ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                : <Search className="h-3.5 w-3.5" />}
-              {busy === 'running' ? 'Running…' : hasSession ? 'Refine' : 'Search'}
+                ? <Loader2 className="h-4 w-4 animate-spin" />
+                : <Search className="h-4 w-4" />}
+              {busy === 'running'
+                ? 'Searching…'
+                : hasSession ? 'Update search' : 'Find products'}
             </Button>
             <MicRecorder onAudio={handleAudio} disabled={!!busy} />
             {busy === 'transcribing' && (
@@ -205,13 +204,46 @@ export default function Home() {
             )}
           </div>
 
+          {!hasSession && !busy && (
+            <div className="mt-4 border-t border-slate-100 pt-3">
+              <p className="mb-2 text-[12.5px] text-slate-500">Try asking</p>
+              <div className="flex flex-wrap gap-2">
+                {[
+                  "Soft twin comforter under $50 that's easy to wash",
+                  'Comfortable backpack for work under $60',
+                  'A challenging 1000 piece jigsaw puzzle under $30',
+                ].map((ex) => (
+                  <button
+                    key={ex}
+                    type="button"
+                    onClick={() => { setLastWasVoice(false); setTranscript(ex); runDiscovery(ex); }}
+                    className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-left text-[13px] text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+                  >
+                    {ex}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {error && (
             <div className="mt-3 flex items-start gap-2 rounded-lg bg-red-50 p-3 text-[13px] text-red-800">
               <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
               <span className="break-words">{error}</span>
             </div>
           )}
+
+          <div className="mt-3 flex justify-end">
+            <CatalogBadge />
+          </div>
         </section>
+
+        {busy === 'running' && (
+          <p className="flex items-center justify-center gap-2 py-6 text-[14px] text-slate-500">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Finding the best matches…
+          </p>
+        )}
 
         {result && (
           <>
@@ -230,25 +262,21 @@ export default function Home() {
               </section>
             )}
 
-            {/* "What I understood" = this utterance. The accumulated state
-                lives in "Your search" above, so a refinement shows only the
-                delta rather than repeating every chip. */}
+            {/* Router transparency. On a refinement this is only the delta —
+                the accumulated state already lives in "Your search" above — so
+                it stays a quiet one-liner rather than a repeated chip wall. */}
             {result.constraint_changes?.length > 0 ? (
-              <section className="rounded-xl border border-slate-200 bg-white p-5">
-                <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                  What I understood
-                </h2>
-                <ul className="flex flex-wrap gap-1.5">
-                  {result.constraint_changes.map((c) => (
-                    <li
-                      key={c}
-                      className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[13px] leading-none text-slate-800"
-                    >
-                      {c}
-                    </li>
-                  ))}
-                </ul>
-              </section>
+              <p className="flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-[13px] text-slate-500">
+                <span className="font-medium text-slate-600">Latest update</span>
+                {result.constraint_changes.map((c) => (
+                  <span
+                    key={c}
+                    className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-slate-700"
+                  >
+                    {c}
+                  </span>
+                ))}
+              </p>
             ) : (
               <ConstraintPanel
                 understood={result.understood}
@@ -263,14 +291,14 @@ export default function Home() {
                 <div className="flex items-start gap-3">
                   <MessageCircleQuestion className="mt-0.5 h-5 w-5 shrink-0 text-slate-500" />
                   <div className="min-w-0 flex-1">
-                    <h2 className="text-sm font-semibold text-slate-900">
-                      One quick question
+                    <h2 className="text-[17px] font-semibold tracking-tight text-slate-900">
+                      A little more detail will help
                     </h2>
                     <p className="mt-1 text-[14.5px] leading-relaxed text-slate-700">
                       {result.clarify.question}
                     </p>
                     <p className="mt-2 text-[12.5px] text-slate-500">
-                      Add a detail above and search again — or pick a starting point:
+                      Pick one to continue, or add a detail above:
                     </p>
                     <div className="mt-3 flex flex-wrap gap-2">
                       {['for everyday use', 'for the gym', 'for travel', 'for a child'].map((s) => (
@@ -301,9 +329,13 @@ export default function Home() {
               />
             )}
 
+            {/* Level 2 — the products are why the user is here */}
             {!isNoMatch && rows.length > 0 && (
               <>
-                <ProductResults rows={rows} />
+                <ProductResults
+                  rows={rows}
+                  requested={result.understood?.qualitative_features || []}
+                />
                 <ComparisonTable rows={rows} reconciliation={result.reconciliation} />
               </>
             )}
@@ -312,13 +344,33 @@ export default function Home() {
               <ProductResults rows={altRows} variant="alternatives" />
             )}
 
+            {/* Level 3 — narrow it down */}
             {!isClarify && rows.length > 0 && (
-              <RefineActions understood={result.understood} onRefine={refine} />
+              <section className="rounded-xl border border-slate-200 bg-white p-5">
+                <h2 className="text-[15px] font-semibold text-slate-900">Narrow it down</h2>
+                <p className="mt-0.5 mb-3 text-[13px] text-slate-500">
+                  Adjust your search — everything above updates.
+                </p>
+                <RefineActions understood={result.understood} onRefine={refine} />
+                <p className="mt-3 text-[12.5px] text-slate-500">
+                  Or{' '}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const el = document.getElementById('query');
+                      el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                      el?.focus();
+                    }}
+                    className="rounded font-medium text-slate-700 underline underline-offset-2 hover:text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+                  >
+                    tell me what you'd change
+                  </button>{' '}
+                  in your own words, by text or voice.
+                </p>
+              </section>
             )}
 
-            <AgentTrace steps={result.steps} />
-
-            {/* Recommendation + audio */}
+            {/* Level 4 — recommendation + audio */}
             {result.spoken_answer && (
               <section className="rounded-xl border border-slate-200 bg-white p-5">
                 <h2 className="mb-2 text-sm font-semibold text-slate-900">Recommendation</h2>
@@ -347,19 +399,17 @@ export default function Home() {
               </section>
             )}
 
+            {/* Level 5 — provenance */}
             {result.citations?.length > 0 && (
               <section className="rounded-xl border border-slate-200 bg-white p-5">
                 <h2 className="mb-3 text-sm font-semibold text-slate-900">Sources</h2>
                 <CitationList citations={result.citations} />
               </section>
             )}
-          </>
-        )}
 
-        {!result && !busy && (
-          <p className="py-10 text-center text-[13.5px] text-slate-500">
-            Record a voice request or type one above to get started.
-          </p>
+            {/* Level 6 — technical transparency, last and collapsed */}
+            <AgentTrace steps={result.steps} />
+          </>
         )}
       </main>
     </div>

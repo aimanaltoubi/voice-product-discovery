@@ -44,17 +44,22 @@ export default function MicRecorder({ onAudio, disabled }) {
       type="button"
       onClick={recording ? stop : start}
       disabled={disabled || loading}
-      variant={recording ? 'destructive' : 'default'}
-      className="rounded-full h-12 px-6 gap-2"
+      variant="outline"
+      className={[
+        'h-9 gap-1.5 rounded-lg px-3 text-[13.5px] font-medium transition-colors',
+        recording
+          ? 'border-red-300 bg-red-50 text-red-800 hover:bg-red-100'
+          : 'border-slate-300 text-slate-800 hover:bg-slate-50',
+      ].join(' ')}
     >
       {loading ? (
-        <Loader2 className="w-4 h-4 animate-spin" />
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
       ) : recording ? (
-        <Square className="w-4 h-4 fill-current" />
+        <Square className="h-3.5 w-3.5 fill-current" />
       ) : (
-        <Mic className="w-4 h-4" />
+        <Mic className="h-3.5 w-3.5" />
       )}
-      {loading ? 'Transcribing…' : recording ? 'Stop recording' : 'Record voice'}
+      {loading ? 'Transcribing…' : recording ? 'Stop' : 'Record'}
     </Button>
   );
 }

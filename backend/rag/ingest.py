@@ -49,6 +49,10 @@ COLUMN_CANDIDATES: dict[str, list[str]] = {
     "ingredients": ["ingredients", "Ingredients"],
     "specs": ["Product Specification", "product_specification", "Technical Details"],
     "reviews": ["review_snippets", "reviews", "Customer Reviews", "customer_reviews"],
+    # Product-level image. The 2020 dump ships a pipe-separated list of Amazon
+    # CDN URLs on the same row as the product, so the first URL is provenanced
+    # to this exact record — no lookup, no guessing, no third-party image.
+    "image": ["image", "Image", "image_url", "Image Url"],
 }
 
 ECO_KEYWORDS = (
@@ -145,6 +149,20 @@ def _fill_pct(df: pd.DataFrame, col: str) -> float:
     return round(100.0 * filled / max(len(df), 1), 1)
 
 
+def _first_image(value: str | None) -> str | None:
+    """First image URL from the row's pipe-separated list, if it is a real URL.
+
+    Anything that is not a plain http(s) image URL is dropped rather than
+    guessed at — an unverifiable image is worse than no image.
+    """
+    if not value:
+        return None
+    first = str(value).split("|")[0].strip()
+    if not re.match(r"^https?://\S+\.(?:jpg|jpeg|png|webp)(?:\?\S*)?$", first, re.I):
+        return None
+    return first
+
+
 def _pick(df: pd.DataFrame, field: str) -> str | None:
     """Resolve a target field to a real column.
 
@@ -238,6 +256,8 @@ def load_and_normalize(
             "brand": val(row, "brand") or "Unknown", "category": category,
             "price": price, "rating": rating, "features": features,
             "ingredients": ingredients, "specs": specs,
+            # First URL only; must be a plain http(s) image from this row.
+            "image": _first_image(val(row, "image")),
             "eco_friendly": is_eco_friendly(blob),
             "size_oz": size_oz,
             "price_per_oz": round(price / size_oz, 4) if price and size_oz else None,
@@ -279,6 +299,7 @@ def build_index(products: pd.DataFrame, provenance: dict | None = None) -> None:
             "category": p["category"], "eco_friendly": bool(p["eco_friendly"]),
             "features": (p["features"] or "")[:400],
             "ingredients": (p["ingredients"] or "")[:300],
+            **({"image": p["image"]} if p.get("image") else {}),
         }
         for numf in ("price", "rating", "size_oz", "price_per_oz"):
             v = p[numf]

@@ -29,8 +29,15 @@ class DiscoveryState(TypedDict, total=False):
     web: dict[str, Any]               # web.search payload (compare or fallback)
     reconciliation: dict[str, Any]    # discrepancy flags per doc_id
     answer: dict[str, Any]            # AnswerOutput.model_dump()
-    mode: str                         # "private" | "web_fallback"
+    mode: str                         # "private" | "web_fallback" | "no_match"
     blocked: bool
+    # Set when the request was too broad to rank responsibly; the graph stops
+    # at the clarify node and asks exactly one question.
+    clarify: dict[str, Any]
+    # Set when a HARD constraint (currently budget) eliminated every candidate.
+    # Presence of this key routes retrieve -> answer instead of the web
+    # fallback, so an over-budget product is never dressed up as a match.
+    no_match: dict[str, Any]
     # Every node appends its own entries; operator.add concatenates them
     # in execution order for the UI's agent step log.
     steps: Annotated[list[dict[str, Any]], operator.add]
@@ -41,9 +48,34 @@ class DiscoveryState(TypedDict, total=False):
 # --------------------------------------------------------------------------
 
 class Constraints(BaseModel):
-    """Constraints the router extracts from the utterance (prompts/router.md)."""
+    """Constraints the router extracts from the utterance (prompts/router.md).
+
+    Split by how they can be enforced:
+      HARD  — budget, brand, size: checkable against structured metadata or
+              literal product text, so they may gate a recommendation.
+      SOFT  — qualitative_features: adjectives ("soft", "easy to wash") that
+              steer semantic ranking. They are never used to reject a product,
+              and are only shown as a match chip when the retrieved evidence
+              literally supports them.
+    """
+    product_type: Optional[str] = Field(
+        default=None, description="What the user is shopping for, e.g. 'comforter set'.")
+    audience: Optional[str] = Field(
+        default=None,
+        description="Who the product is for, in the user's own terms: "
+                    "'adult', 'child', 'toddler', 'baby', 'family', 'gift'. "
+                    "Only when the user said or clearly implied it.")
+    use_case: Optional[str] = Field(
+        default=None,
+        description="How it will be used: 'gym', 'school', 'travel', 'hiking', "
+                    "'office', 'everyday'. Only when stated.")
     budget: Optional[float] = Field(
         default=None, description="Budget ceiling in USD, if stated.")
+    size: Optional[str] = Field(
+        default=None, description="Size/variant if stated, e.g. 'twin', '1000 piece'.")
+    qualitative_features: List[str] = Field(
+        default_factory=list,
+        description="Soft preferences as short phrases, e.g. ['soft', 'easy to wash'].")
     material: Optional[str] = Field(
         default=None, description="Surface/material, e.g. 'stainless steel'.")
     brand: Optional[str] = None
@@ -65,6 +97,9 @@ class RouterOutput(BaseModel):
     needs_live: bool = Field(
         default=False,
         description="True if the user asked for current/latest price, stock or availability.")
+    top_k: int = Field(
+        default=3,
+        description="How many products the user asked to compare. Default 3.")
 
 
 class RetrievalFilters(BaseModel):

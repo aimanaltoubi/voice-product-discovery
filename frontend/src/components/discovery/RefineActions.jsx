@@ -43,12 +43,9 @@ export default function RefineActions({ understood, onRefine }) {
     ? [...actions.slice(0, 3), actions[actions.length - 1]]
     : actions;
 
+  // Heading is supplied by the "Narrow it down" section in Home.jsx.
   return (
-    <section className="space-y-2">
-      <h2 className="text-[12px] font-medium uppercase tracking-wide text-slate-500">
-        Refine
-      </h2>
-      <div className="flex flex-wrap gap-2">
+    <div className="flex flex-wrap gap-2">
         {shown.map((a) => (
           <button
             key={a.label}
@@ -59,7 +56,6 @@ export default function RefineActions({ understood, onRefine }) {
             {a.label}
           </button>
         ))}
-      </div>
-    </section>
+    </div>
   );
 }

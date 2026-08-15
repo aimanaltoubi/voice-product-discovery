@@ -21,9 +21,12 @@ export default function NoMatchState({ noMatch, onRaiseBudget, onSearchOnline })
       <div className="flex items-start gap-3">
         <SearchX className="mt-0.5 h-5 w-5 shrink-0 text-amber-700" />
         <div className="min-w-0 flex-1">
-          <h2 className="text-sm font-semibold text-slate-900">No exact matches</h2>
-          <p className="mt-1 text-[13.5px] text-slate-700">
-            No catalog products matched all of your criteria.
+          <h2 className="text-[17px] font-semibold tracking-tight text-slate-900">
+            No exact matches
+          </h2>
+          <p className="mt-1 text-[14px] text-slate-700">
+            Nothing in the catalog met all of your current requirements. Here's what
+            would need to change.
           </p>
 
           <dl className="mt-3 grid gap-x-8 gap-y-2 sm:grid-cols-2 text-[13.5px]">

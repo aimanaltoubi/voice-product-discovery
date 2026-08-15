@@ -12,6 +12,7 @@ import CatalogBadge from '@/components/discovery/CatalogBadge';
 import CitationList from '@/components/discovery/CitationList';
 import RefineActions from '@/components/discovery/RefineActions';
 import YourSearch from '@/components/discovery/YourSearch';
+import ComparisonTable from '@/components/discovery/ComparisonTable';
 
 export default function Home() {
   const [transcript, setTranscript] = useState('');
@@ -22,6 +23,7 @@ export default function Home() {
   // The active search session: accumulated constraints + refinement history.
   // Browser-held and passed explicitly on every request — no server session.
   const [session, setSession] = useState(null);
+  const [lastWasVoice, setLastWasVoice] = useState(false);
 
   const handleAudio = async (blob) => {
     setError('');
@@ -30,6 +32,7 @@ export default function Home() {
       const res = await transcribe(blob);
       const t = res.transcript || '';
       setTranscript(t);
+      setLastWasVoice(true);
       // Voice follows the same path as text: if a session is active this
       // utterance is a refinement of it, not a new search.
       if (t.trim()) await runDiscovery(t);
@@ -215,7 +218,14 @@ export default function Home() {
             {/* Transcript */}
             {result.transcript && (
               <section className="rounded-xl border border-slate-200 bg-white p-5">
-                <h2 className="mb-1.5 text-sm font-semibold text-slate-900">Transcript</h2>
+                <h2 className="mb-1.5 text-sm font-semibold text-slate-900">
+                  You said
+                  {lastWasVoice && (
+                    <span className="ml-2 rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[11px] font-medium text-slate-500">
+                      via voice · Whisper
+                    </span>
+                  )}
+                </h2>
                 <p className="text-[14.5px] leading-relaxed text-slate-700">“{result.transcript}”</p>
               </section>
             )}
@@ -291,7 +301,12 @@ export default function Home() {
               />
             )}
 
-            {!isNoMatch && rows.length > 0 && <ProductResults rows={rows} />}
+            {!isNoMatch && rows.length > 0 && (
+              <>
+                <ProductResults rows={rows} />
+                <ComparisonTable rows={rows} reconciliation={result.reconciliation} />
+              </>
+            )}
 
             {isNoMatch && altRows.length > 0 && (
               <ProductResults rows={altRows} variant="alternatives" />
@@ -306,21 +321,28 @@ export default function Home() {
             {/* Recommendation + audio */}
             {result.spoken_answer && (
               <section className="rounded-xl border border-slate-200 bg-white p-5">
-                <div className="mb-2.5 flex flex-wrap items-center justify-between gap-3">
-                  <h2 className="text-sm font-semibold text-slate-900">Recommendation</h2>
+                <h2 className="mb-2 text-sm font-semibold text-slate-900">Recommendation</h2>
+                {/* Detailed text on screen; TTS speaks the short summary. */}
+                <p className="text-[15px] leading-relaxed text-slate-800">
+                  {result.answer_detail || result.spoken_answer}
+                </p>
+                <div className="mt-4 flex flex-wrap items-center gap-3">
                   <Button
                     onClick={playTts}
                     disabled={busy === 'speaking'}
-                    variant="outline"
-                    className="h-8 gap-1.5 rounded-lg border-slate-300 px-3 text-[13px] font-medium text-slate-800 hover:bg-slate-50"
+                    className="h-10 gap-2 rounded-lg bg-slate-900 px-4 text-[14px] font-medium text-white hover:bg-slate-800"
                   >
                     {busy === 'speaking'
-                      ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      : <Volume2 className="h-3.5 w-3.5" />}
-                    {busy === 'speaking' ? 'Synthesizing…' : ttsUrl ? 'Replay' : 'Play response'}
+                      ? <Loader2 className="h-4 w-4 animate-spin" />
+                      : <Volume2 className="h-4 w-4" />}
+                    {busy === 'speaking'
+                      ? 'Synthesizing…'
+                      : ttsUrl ? 'Replay recommendation' : 'Play recommendation'}
                   </Button>
+                  <span className="text-[12.5px] text-slate-500">
+                    Spoken summary ≈{result.spoken_answer.split(/\s+/).length} words
+                  </span>
                 </div>
-                <p className="text-[15px] leading-relaxed text-slate-800">{result.spoken_answer}</p>
                 {ttsUrl && <audio controls autoPlay src={ttsUrl} className="mt-3 w-full" />}
               </section>
             )}

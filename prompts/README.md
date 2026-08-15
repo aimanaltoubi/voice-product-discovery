@@ -28,8 +28,31 @@ deterministic code, which is more auditable than an LLM for these jobs:
   `safety_flags` (`backend/graph/nodes.py`).
 - `reconcile` — SKU/brand/title fuzzy matching between catalog and live web
   results + price-delta discrepancy flags (`backend/graph/nodes.py`).
+- `clarify` — when a request names a product but carries no budget, audience,
+  use case, size, brand, material or preference, one fixed question is asked and
+  no retrieval runs (`clarification_needed()` in `backend/graph/nodes.py`).
+- `session` — merges a refinement onto the accumulated constraints
+  (`merge_constraints()` in `backend/graph/nodes.py`).
+- Match chips ("Why this product") — generated from retrieved evidence by
+  `match_evidence()`, never written by the LLM.
 - MCP tools `web.search` and `rag.search` — pure retrieval, no generation
   (`backend/mcp_server/server.py`).
+
+## Few-shot examples
+
+**Yes — few-shot examples are used, for the Router only.**
+`few_shots_router.md` is loaded at runtime by `router_node` and injected into
+`router.md` at the `<<few_shots>>` placeholder
+(`backend/graph/nodes.py`: `full_prompt("router", few_shots=load("few_shots_router"), ...)`).
+No other node uses few-shot examples.
+
+## Verifying these are the real runtime prompts
+
+Every file here is read from disk at call time by `backend/graph/prompts.py`
+(`load()` / `render()` / `full_prompt()`); none is duplicated inside Python. To
+see the exact text sent to the model for a given run, expand **How the assistant
+worked → Raw step data** in the UI: the router and answerer steps include a
+`prompt_file` field and a `prompt_preview` of the rendered prompt.
 
 ## Planner rubric (as required by the brief)
 

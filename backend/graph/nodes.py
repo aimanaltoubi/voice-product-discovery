@@ -91,6 +91,87 @@ _FEATURE_SYNONYMS: dict[str, tuple[str, ...]] = {
 }
 
 
+# --- search-session refinement ---------------------------------------------
+# A refinement is not a new search: the utterance ("make it machine washable")
+# is parsed by the same Router, then merged onto the constraints the session
+# already carries. Structured scalars are replaced by the latest explicit
+# value; qualitative preferences accumulate. The merged set then drives a fresh
+# full-catalog retrieval — refinement never filters the previous result list.
+
+# Latest explicit value wins for these — "under $40" must replace "under $50",
+# not intersect with it.
+_REPLACE_FIELDS = (
+    "product_type", "budget", "size", "audience", "use_case",
+    "brand", "category", "material", "eco_friendly",
+)
+
+
+def merge_constraints(prior: dict | None, new: dict | None) -> dict:
+    merged = dict(prior or {})
+    for field in _REPLACE_FIELDS:
+        value = (new or {}).get(field)
+        if value not in (None, "", []):
+            merged[field] = value
+    feats = list(merged.get("qualitative_features") or [])
+    seen = {str(f).strip().lower() for f in feats}
+    for f in (new or {}).get("qualitative_features") or []:
+        key = str(f).strip().lower()
+        if key and key not in seen:
+            feats.append(f)
+            seen.add(key)
+    merged["qualitative_features"] = feats
+    return merged
+
+
+def diff_constraints(prior: dict | None, merged: dict) -> list[str]:
+    """Human-readable description of what this refinement changed."""
+    prior = prior or {}
+    changes: list[str] = []
+    for field in _REPLACE_FIELDS:
+        before, after = prior.get(field), merged.get(field)
+        if after in (None, "") or before == after:
+            continue
+        label = field.replace("_", " ").capitalize()
+        if field == "budget":
+            changes.append(f"Budget: {_money(before)} → {_money(after)}" if before
+                           else f"Budget: ≤ {_money(after)}")
+        elif before:
+            changes.append(f"{label}: {before} → {after}")
+        else:
+            changes.append(f"{label}: {after}")
+    before_f = {str(f).lower() for f in (prior.get("qualitative_features") or [])}
+    added = [f for f in (merged.get("qualitative_features") or [])
+             if str(f).lower() not in before_f]
+    if added:
+        changes.append("Added: " + ", ".join(added))
+    removed = [f for f in (prior.get("qualitative_features") or [])
+               if str(f).lower() not in {str(x).lower()
+                                         for x in (merged.get("qualitative_features") or [])}]
+    if removed:
+        changes.append("Removed: " + ", ".join(removed))
+    return changes
+
+
+def compose_query(constraints: dict, fallback: str = "") -> str:
+    """Flatten the accumulated session into the semantic query for rag.search.
+
+    Retrieval must see the whole intent, not just the latest utterance — a
+    refinement like "make it machine washable" is meaningless as a search on
+    its own, and the best product may sit outside the previous top 3.
+    """
+    c = constraints or {}
+    parts = [c.get("product_type"), c.get("size"), c.get("material")]
+    parts += list(c.get("qualitative_features") or [])
+    if c.get("audience"):
+        parts.append(f"for {c['audience']}")
+    if c.get("use_case"):
+        parts.append(f"for {c['use_case']}")
+    if c.get("brand"):
+        parts.append(str(c["brand"]))
+    query = " ".join(str(p).strip() for p in parts if p)
+    return query or fallback
+
+
 # --- broad-query clarification --------------------------------------------
 # One question, asked only when the request names a product but carries almost
 # nothing to rank on. Deterministic so the behaviour is explainable and testable
@@ -311,6 +392,35 @@ def build_nodes(mcp: MCPToolClient) -> dict:
     # ---- 1. Router --------------------------------------------------------
     async def router_node(state: dict) -> dict:
         transcript = state["transcript"]
+
+        # "apply" — the client edited the constraint set directly (e.g. removed a
+        # preference chip). Running extraction here would be actively wrong:
+        # "Remove the soft preference" contains the word "soft", so the router
+        # would parse it straight back in. Use the given constraints verbatim.
+        if state.get("apply_only"):
+            c = dict(state.get("prior_constraints") or {})
+            router = {
+                "task": "product_recommendation",
+                "constraints": c,
+                "safety_flags": [],
+                "needs_live": bool(state.get("prior_needs_live")),
+                "top_k": state.get("prior_top_k") or 3,
+            }
+            effective = compose_query(c, transcript)
+            return {
+                "router": router,
+                "effective_query": effective,
+                "constraint_changes": state.get("applied_changes") or [],
+                "steps": [step(
+                    "session",
+                    {"applied_constraints": c, "note": "client-edited constraints; "
+                     "router extraction skipped so the edit is not re-parsed"},
+                    {"merged_constraints": c, "search_query": effective},
+                    label="Updating search",
+                    detail=" · ".join(state.get("applied_changes") or []) or "Constraints updated",
+                )],
+            }
+
         prompt = full_prompt(
             "router",
             few_shots=load("few_shots_router"),
@@ -320,6 +430,19 @@ def build_nodes(mcp: MCPToolClient) -> dict:
             prompt, RouterOutput, node="router", context={"transcript": transcript}
         )
         router = out.model_dump()
+
+        # Refinement: fold this utterance's constraints onto the session's.
+        prior = state.get("prior_constraints") or None
+        changes: list[str] = []
+        if prior:
+            merged = merge_constraints(prior, router.get("constraints") or {})
+            changes = diff_constraints(prior, merged)
+            router["constraints"] = merged
+            # top_k is only meaningful when this utterance asked for a count.
+            if not re.search(r"\b(compare|show|top|best)\b.*\b(\d+|three|four|five)\b",
+                             transcript, re.I):
+                router["top_k"] = state.get("prior_top_k") or router.get("top_k") or 3
+
         c = router.get("constraints") or {}
         bits = [
             c.get("product_type"),
@@ -328,20 +451,35 @@ def build_nodes(mcp: MCPToolClient) -> dict:
             *(c.get("qualitative_features") or []),
         ]
         detail = " · ".join(_titlecase(str(b)) for b in bits if b)
+        effective = compose_query(c, transcript)
+        out_steps = [step(
+            "router",
+            {
+                "transcript": transcript,
+                "refinement_of": prior or None,
+                "prompt_file": "prompts/router.md (+ few_shots_router.md)",
+                "prompt_preview": _preview(prompt),
+                "llm": f"{settings.LLM_PROVIDER}:{settings.LLM_MODEL}",
+            },
+            router,
+            label=("Understanding refinement" if prior else
+                   "Fresh information requested" if router.get("needs_live") else
+                   "Understanding request"),
+            detail=(" · ".join(changes) if changes else detail) or "No explicit constraints",
+        )]
+        if prior:
+            out_steps.append(step(
+                "session",
+                {"previous_constraints": prior, "utterance": transcript},
+                {"merged_constraints": c, "changes": changes, "search_query": effective},
+                label="Updating search",
+                detail=detail or "No explicit constraints",
+            ))
         return {
             "router": router,
-            "steps": [step(
-                "router",
-                {
-                    "transcript": transcript,
-                    "prompt_file": "prompts/router.md (+ few_shots_router.md)",
-                    "prompt_preview": _preview(prompt),
-                    "llm": f"{settings.LLM_PROVIDER}:{settings.LLM_MODEL}",
-                },
-                router,
-                label="Fresh information requested" if router.get("needs_live") else "Understanding request",
-                detail=detail or "No explicit constraints",
-            )],
+            "effective_query": effective,
+            "constraint_changes": changes,
+            "steps": out_steps,
         }
 
     def route_after_router(state: dict) -> str:
@@ -454,7 +592,8 @@ def build_nodes(mcp: MCPToolClient) -> dict:
 
     # ---- 4. Retrieve via MCP rag.search + LLM rerank ----------------------
     async def retrieve_node(state: dict) -> dict:
-        transcript = state["transcript"]
+        # Search on the accumulated intent, not the latest utterance alone.
+        transcript = state.get("effective_query") or state["transcript"]
         plan = state["plan"]
         f = plan.get("retrieval_filters") or {}
         args: dict[str, Any] = {"query": transcript, "top_k": settings.RAG_TOP_K}
@@ -486,7 +625,12 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                 #                     "no private match" -> existing web fallback
                 # Blaming the budget in the second case would name the wrong
                 # constraint and quote a price that does not exist.
-                probe = await mcp.call("rag.search", {"query": transcript, "top_k": settings.RAG_TOP_K})
+                # Same filters, price removed — so a non-empty probe means
+                # "this product exists here, just not at your price". Dropping
+                # every filter instead would blame the budget for a miss the
+                # category or material filter actually caused.
+                probe_args = {k: v for k, v in args.items() if k != "max_price"}
+                probe = await mcp.call("rag.search", probe_args)
                 probe_rows = [r for r in probe.get("results", []) if r.get("doc_id")]
                 prices = [r["price"] for r in probe_rows
                           if isinstance(r.get("price"), (int, float))]
@@ -743,7 +887,9 @@ def build_nodes(mcp: MCPToolClient) -> dict:
 
     # ---- 7. Answerer / Critic ---------------------------------------------
     async def answer_node(state: dict) -> dict:
-        transcript = state["transcript"]
+        # Answer against the full accumulated request so the summary reflects
+        # every constraint, not just the last thing the user said.
+        transcript = state.get("effective_query") or state["transcript"]
         mode = state.get("mode", "private")
         picks = state.get("top_picks", [])
 

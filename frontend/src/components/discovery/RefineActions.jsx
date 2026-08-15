@@ -1,51 +1,47 @@
 import React from 'react';
 
 /**
- * Quick refinements. Each one just submits a refined natural-language request
- * through the normal pipeline — no separate recommendation engine, and no
- * pretend conversational memory: the product type is written into the query
- * text explicitly so the request stands on its own.
+ * Quick refinements. Each submits a short refinement utterance against the
+ * ACTIVE session — the backend merges it onto the accumulated constraints, so
+ * these no longer need to restate the product type. Nothing here filters the
+ * current result list; every click reruns full-catalog retrieval.
  */
 export default function RefineActions({ understood, onRefine }) {
-  if (!understood || !onRefine) return null;
-
-  const product = understood.product_type;
-  if (!product) return null;
+  if (!understood?.product_type || !onRefine) return null;
 
   const budget = understood.budget;
-  const audience = (understood.audience || '').toLowerCase();
-  const isChild = /child|kid|toddler|baby|infant|teen/.test(audience);
+  const features = (understood.qualitative_features || []).map((f) => f.toLowerCase());
+  const has = (f) => features.some((x) => x.includes(f));
 
   const actions = [];
 
   if (typeof budget === 'number') {
     actions.push({
       label: 'Cheaper',
-      query: `Recommend a ${product} under $${Math.max(1, Math.floor(budget / 2))}.`,
+      query: `Actually keep it under $${Math.max(1, Math.floor(budget * 0.75))}.`,
     });
   } else {
-    actions.push({ label: 'Budget options', query: `Recommend an affordable ${product} under $25.` });
+    actions.push({ label: 'Cheaper', query: 'Show me cheaper options.' });
   }
 
-  if (!understood.use_case) {
-    actions.push({ label: 'For travel', query: `Recommend a ${product} for travel.` });
+  if (!has('light')) actions.push({ label: 'Lightweight', query: 'Something lightweight too.' });
+  if (!has('compact') && !has('small')) {
+    actions.push({ label: 'More compact', query: 'Something more compact.' });
   }
-
-  if (!audience) {
-    actions.push({ label: 'For adults', query: `Recommend a ${product} for an adult.` });
-    actions.push({ label: 'For kids', query: `Recommend a ${product} for a child.` });
-  } else if (isChild) {
-    actions.push({ label: 'For adults', query: `Recommend a ${product} for an adult.` });
-  } else {
-    actions.push({ label: 'For kids', query: `Recommend a ${product} for a child.` });
+  if (!has('wash')) {
+    actions.push({ label: 'Machine washable', query: 'Make it machine washable.' });
   }
+  if (!has('durable')) actions.push({ label: 'More durable', query: 'Something more durable.' });
 
   actions.push({
     label: 'Check current prices',
-    query: `What is the current online price and availability of ${product}${
-      typeof budget === 'number' ? ` under $${budget}` : ''
-    } right now?`,
+    query: 'What is the current online price and availability of these right now?',
   });
+
+  // Keep the live-price action, drop the middle if we have too many.
+  const shown = actions.length > 4
+    ? [...actions.slice(0, 3), actions[actions.length - 1]]
+    : actions;
 
   return (
     <section className="space-y-2">
@@ -53,7 +49,7 @@ export default function RefineActions({ understood, onRefine }) {
         Refine
       </h2>
       <div className="flex flex-wrap gap-2">
-        {actions.slice(0, 4).map((a) => (
+        {shown.map((a) => (
           <button
             key={a.label}
             type="button"

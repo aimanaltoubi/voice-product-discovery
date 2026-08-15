@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { transcribe, discover, speak } from '@/api/client';
+import React, { useEffect, useState } from 'react';
+import { transcribe, discover, speak, health } from '@/api/client';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Volume2, Loader2, AlertCircle, Search, MessageCircleQuestion } from 'lucide-react';
@@ -13,6 +13,7 @@ import CitationList from '@/components/discovery/CitationList';
 import RefineActions from '@/components/discovery/RefineActions';
 import YourSearch from '@/components/discovery/YourSearch';
 import ComparisonTable from '@/components/discovery/ComparisonTable';
+import BrandHeader from '@/components/discovery/BrandHeader';
 
 export default function Home() {
   const [transcript, setTranscript] = useState('');
@@ -24,6 +25,15 @@ export default function Home() {
   // Browser-held and passed explicitly on every request — no server session.
   const [session, setSession] = useState(null);
   const [lastWasVoice, setLastWasVoice] = useState(false);
+  // Fetched once here and shared with CatalogBadge so the capability line can
+  // state a real product count instead of a hardcoded one.
+  const [catalog, setCatalog] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    health().then((h) => alive && setCatalog(h.catalog)).catch(() => {});
+    return () => { alive = false; };
+  }, []);
 
   const handleAudio = async (blob) => {
     setError('');
@@ -151,15 +161,8 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-slate-50/60 text-slate-900 antialiased">
       <main className="mx-auto max-w-3xl space-y-6 px-5 py-8 sm:px-6 sm:py-10">
-        {/* Level 1 — the goal and the primary action */}
-        <header className={hasSession ? '' : 'pt-4 text-center'}>
-          <h1 className="text-[26px] font-semibold tracking-tight text-slate-900 sm:text-[30px]">
-            Find the right product
-          </h1>
-          <p className="mt-1.5 text-[15px] text-slate-500">
-            Describe what you're looking for, then refine until it fits.
-          </p>
-        </header>
+        {/* Level 1 — brand, then the primary action */}
+        <BrandHeader compact={hasSession} />
 
         <YourSearch
           session={session}
@@ -208,16 +211,20 @@ export default function Home() {
             <div className="mt-4 border-t border-slate-100 pt-3">
               <p className="mb-2 text-[12.5px] text-slate-500">Try asking</p>
               <div className="flex flex-wrap gap-2">
+                {/* Each verified to return real private-catalog results — a
+                    landing example that falls through to web search would make
+                    the catalog look empty. */}
                 {[
                   "Soft twin comforter under $50 that's easy to wash",
-                  'Comfortable backpack for work under $60',
                   'A challenging 1000 piece jigsaw puzzle under $30',
+                  'Plush stuffed animal for a toddler under $20',
                 ].map((ex) => (
                   <button
                     key={ex}
                     type="button"
+                    disabled={!!busy}
                     onClick={() => { setLastWasVoice(false); setTranscript(ex); runDiscovery(ex); }}
-                    className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-left text-[13px] text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+                    className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-left text-[13px] text-slate-600 transition-colors hover:border-slate-300 hover:bg-slate-100 hover:text-slate-900 active:bg-slate-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {ex}
                   </button>
@@ -233,8 +240,22 @@ export default function Home() {
             </div>
           )}
 
-          <div className="mt-3 flex justify-end">
-            <CatalogBadge />
+          {/* Quiet capability line. The count comes from /api/health, so it is
+              never hardcoded and simply omits itself if health is unavailable
+              or the catalog is in sample mode (CatalogBadge carries the
+              sample-data warning). */}
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+            {!hasSession && (
+              <p className="text-[12px] text-slate-400">
+                {catalog?.is_real_data && typeof catalog.count === 'number'
+                  ? `${catalog.count.toLocaleString()} products · `
+                  : ''}
+                Grounded recommendations · Live checks when needed
+              </p>
+            )}
+            <div className="ml-auto">
+              <CatalogBadge catalog={catalog} />
+            </div>
           </div>
         </section>
 
@@ -351,7 +372,11 @@ export default function Home() {
                 <p className="mt-0.5 mb-3 text-[13px] text-slate-500">
                   Adjust your search — everything above updates.
                 </p>
-                <RefineActions understood={result.understood} onRefine={refine} />
+                <RefineActions
+                  understood={result.understood}
+                  onRefine={refine}
+                  disabled={!!busy}
+                />
                 <p className="mt-3 text-[12.5px] text-slate-500">
                   Or{' '}
                   <button

@@ -43,12 +43,24 @@ mkdir -p "$RAW_DIR"
 echo "[fetch] downloading $DATASET -> $RAW_DIR"
 "$KAGGLE_BIN" datasets download -d "$DATASET" -p "$RAW_DIR" --unzip
 
-# The archive nests its payload, so locate the real CSV wherever it landed.
+# The Kaggle archive carries its own internal path (data/raw/home/sdf/...), so
+# --unzip reproduces it and you end up with data/raw/data/raw/home/sdf/*.csv.
+# Locate the CSV wherever it landed, then lift it to the top of data/raw/ and
+# drop the empty scaffolding so the tree stays flat.
 CSV="$(find "$RAW_DIR" -name '*.csv' -type f -print0 \
        | xargs -0 ls -S 2>/dev/null | head -1 || true)"
 if [ -z "$CSV" ]; then
   echo "ERROR: no CSV found under $RAW_DIR after download." >&2
   exit 1
+fi
+
+if [ "$(dirname "$CSV")" != "$RAW_DIR" ]; then
+  echo "[fetch] flattening nested archive layout"
+  mv -f "$CSV" "$RAW_DIR/"
+  CSV="$RAW_DIR/$(basename "$CSV")"
+  # Move any sibling zip up too, then prune the empty directories left behind.
+  find "$RAW_DIR" -mindepth 2 -name '*.zip' -type f -exec mv -f {} "$RAW_DIR/" \; 2>/dev/null || true
+  find "$RAW_DIR" -mindepth 1 -type d -empty -delete 2>/dev/null || true
 fi
 
 echo

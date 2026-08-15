@@ -29,6 +29,14 @@
     --chart-4: 43 74% 66%;
     --chart-5: 27 87% 67%;
     --radius: 0.5rem;
+    /* Brand wordmark only — the rest of the UI keeps the neutral stack below.
+       `ui-rounded` resolves to SF Pro Rounded on macOS/iOS and Segoe UI Rounded
+       on Windows, giving a friendly rounded display face with NO web-font
+       download: nothing to fail on classroom wifi. Named fallbacks follow for
+       machines that have them, then the normal sans stack. */
+    --font-brand: ui-rounded, "SF Pro Rounded", "Segoe UI Rounded",
+      "Varela Round", Nunito, Quicksand, "Trebuchet MS",
+      ui-sans-serif, system-ui, sans-serif;
     --font-heading: ui-sans-serif, system-ui, sans-serif;
     --font-body: ui-sans-serif, system-ui, sans-serif;
     --font-display: ui-sans-serif, system-ui, sans-serif;

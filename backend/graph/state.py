@@ -12,7 +12,7 @@ from __future__ import annotations
 import operator
 from typing import Annotated, Any, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing_extensions import TypedDict
 
 
@@ -92,13 +92,18 @@ class Constraints(BaseModel):
     eco_friendly: Optional[bool] = Field(
         default=None, description="True only if eco/green/natural was implied.")
 
+    @field_validator("qualitative_features", mode="before")
+    @classmethod
+    def normalize_null_features(cls, value):
+        return value or []
+
 
 class RouterOutput(BaseModel):
     """Intent + constraint extraction, plus safety and freshness flags."""
     task: str = Field(
         default="product_recommendation",
         description="Short task label, e.g. 'product_recommendation'.")
-    constraints: Constraints = Field(default_factory=Constraints)
+    constraints: Optional[Constraints] = Field(default=None)
     safety_flags: List[str] = Field(
         default_factory=list,
         description="Non-empty if the request seeks unsafe chemical advice.")
@@ -124,7 +129,7 @@ class PlanOutput(BaseModel):
         default_factory=lambda: ["rag.search"])
     retrieval_filters: RetrievalFilters = Field(default_factory=RetrievalFilters)
     comparison_criteria: List[str] = Field(
-        default_factory=lambda: ["price", "rating"])
+        default_factory=lambda: ["price", "features"])
 
 
 class RerankOutput(BaseModel):

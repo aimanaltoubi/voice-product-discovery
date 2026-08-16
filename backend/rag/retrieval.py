@@ -100,21 +100,24 @@ def hybrid_search(
             include=["metadatas", "distances"],
         )
 
-    relaxations: list[str] = []
-    wd = {"$contains": material.lower()} if material else None
-    attempts = [
-        (_where(True, True, True), wd, None),
-        (_where(True, True, True), None, "dropped material $contains filter"),
-        (_where(False, True, True), None, "dropped category filter"),
-        (None, None, "dropped all metadata filters (price re-checked in Python)"),
-    ]
+    relaxations: list[str] = (
+        [f"category {category!r} did not resolve to a catalog category; vector retrieval only"]
+        if category and not resolved_cat else []
+    )
+    attempts = [(_where(True, True, True), None, None)]
+    if material:
+        attempts.insert(0, (_where(True, True, True), {"$contains": material.lower()}, None))
+        attempts[1] = (attempts[1][0], None, "dropped material $contains filter")
+    if resolved_cat:
+        attempts.append((_where(False, True, True), None, "dropped category filter"))
+    attempts.append((None, None, "dropped all metadata filters (price re-checked in Python)"))
     res = None
     for where, where_doc, note in attempts:
+        if note:
+            relaxations.append(note)
         res = _query(where, where_doc)
         if res["ids"] and res["ids"][0]:
             break
-        if note:
-            relaxations.append(note)
 
     results: list[dict] = []
     below_floor = 0
@@ -130,7 +133,9 @@ def hybrid_search(
                 "price": meta.get("price"),
                 "rating": meta.get("rating"),
                 "ingredients": meta.get("ingredients"),
+                "specification": meta.get("specification"),
                 "features": meta.get("features"),
+                "url": meta.get("url") or None,
                 "eco_friendly": meta.get("eco_friendly"),
                 "size_oz": meta.get("size_oz"),
                 "price_per_oz": meta.get("price_per_oz"),
@@ -138,7 +143,7 @@ def hybrid_search(
                 "score": round(1.0 / (1.0 + float(dist)), 4),
             }
             # Python-side price guard for the fully-relaxed attempt.
-            if relaxations and max_price is not None and isinstance(row["price"], (int, float)) \
+            if max_price is not None and isinstance(row["price"], (int, float)) \
                and row["price"] > float(max_price):
                 continue
             results.append(row)

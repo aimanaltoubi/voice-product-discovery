@@ -240,7 +240,7 @@ def _evidence_blob(row: dict) -> str:
     """The literal text a chip is allowed to cite."""
     return " ".join(
         str(row.get(k) or "")
-        for k in ("title", "features", "ingredients", "category")
+        for k in ("title", "features", "ingredients", "specification", "category")
     ).lower()
 
 
@@ -414,6 +414,7 @@ def _slim(row: dict, *, keep_features: int = 220) -> dict:
         "price_per_oz": row.get("price_per_oz"),
         "eco_friendly": row.get("eco_friendly"),
         "ingredients": (row.get("ingredients") or None),
+        "specification": (row.get("specification") or None),
         "features": (row.get("features") or "")[:keep_features] or None,
     }
     # NB: `image` is deliberately NOT included — _slim feeds the rerank and
@@ -430,7 +431,122 @@ def _norm(text: str) -> str:
     return re.sub(r"[^a-z0-9 ]+", " ", (text or "").lower()).strip()
 
 
+_QUERY_STOPWORDS = {
+    "recommend", "find", "show", "need", "want", "give", "buy", "price",
+    "what", "which", "where", "when", "how", "who", "you", "your", "have",
+    "has", "any", "some", "option", "options", "looking", "look", "does",
+    "current", "latest", "less", "than", "under", "below", "dollar", "dollars",
+    "this", "still", "sold", "available", "being", "stock", "restock", "restocked",
+    "discontinued", "today", "these", "days", "date", "product", "products",
+    "for", "with", "the", "and", "kids", "kid", "child", "children", "mom",
+    "mother", "dad", "father", "year", "years", "old", "please", "me",
+}
+
+_MATERIAL_PATTERNS = {
+    "stainless steel": re.compile(r"\bstainless[- ]steel\b", re.I),
+    "wood": re.compile(r"\b(?:wood|wooden)\b", re.I),
+    "glass": re.compile(r"\bglass\b", re.I),
+    "plastic": re.compile(r"\bplastic\b", re.I),
+    "ceramic": re.compile(r"\bceramic\b", re.I),
+    "silicone": re.compile(r"\bsilicone\b", re.I),
+    "aluminum": re.compile(r"\b(?:aluminum|aluminium)\b", re.I),
+    "non-toxic": re.compile(r"\bnon[- ]?toxic\b", re.I),
+}
+
+
+def _extract_material(text: str) -> str | None:
+    return next((name for name, pattern in _MATERIAL_PATTERNS.items() if pattern.search(text)), None)
+
+
+def _query_terms(query: str) -> list[str]:
+    for pattern in _MATERIAL_PATTERNS.values():
+        query = pattern.sub(" ", query)
+    return [
+        term for term in re.findall(r"[a-z0-9]+", query.lower())
+        if len(term) >= 3 and not term.isdigit() and term not in _QUERY_STOPWORDS
+    ]
+
+
+def _lexical_anchor_terms(query: str, rows: list[dict]) -> set[str]:
+    terms = set(_query_terms(query))
+    present = {
+        term for term in terms
+        if any(re.search(rf"\b{re.escape(term)}s?\b", row.get("title", ""), re.I) for row in rows)
+    }
+    return present or terms
+
+
+def _matches_anchor(row: dict, anchors: set[str]) -> bool:
+    return not anchors or any(
+        re.search(rf"\b{re.escape(term)}s?\b", row.get("title", ""), re.I)
+        for term in anchors
+    )
+
+
+def _matches_material(row: dict, material: str | None) -> bool:
+    if not material:
+        return True
+    evidence = " ".join(str(row.get(k) or "") for k in ("title", "features", "specification"))
+    pattern = _MATERIAL_PATTERNS.get(material)
+    return bool(pattern.search(evidence)) if pattern else _norm(material) in _norm(evidence)
+
+
+def _web_row_allowed(
+    row: dict, anchors: set[str], max_price: float | None, material: str | None = None,
+) -> bool:
+    return _matches_anchor(row, anchors) and _matches_material(row, material) and (
+        max_price is None
+        or isinstance(row.get("price"), (int, float)) and row["price"] <= max_price
+    )
+
+
 _PRICE_RE = re.compile(r"\$\s?(\d{1,4}(?:[.,]\d{2})?)")
+_LIVE_RE = re.compile(
+    r"\b(?:current(?:ly)?|latest|right now|today|these days|in stock|out of stock|"
+    r"restock\w*|availability|available now|still (?:sold|available|being sold)|"
+    r"discontinued|live price|up to date)\b",
+    re.I,
+)
+_MONEY_RE = re.compile(
+    r"\$|\bdollars?\b|\bbucks?\b|\bprice[ds]?\b|\bbudget\b|\bcheap\w*\b|\bcost\w*\b",
+    re.I,
+)
+_LIMIT_RE = re.compile(r"\b(?:under|below|less than|up to|no more than|max(?:imum)?)\b", re.I)
+_AGE_RE = re.compile(r"\b\d+\s*(?:\+\s*)?(?:year|yr|month|mo)s?\b|\bages?\b", re.I)
+_ECO_REQUEST_RE = re.compile(
+    r"\b(?:eco(?:[- ]friendly)?|green|sustainab\w*|biodegradable|plant[- ]based|non[- ]?toxic)\b",
+    re.I,
+)
+
+
+def _budget_is_grounded(text: str) -> bool:
+    if _MONEY_RE.search(text):
+        return True
+    return bool(_LIMIT_RE.search(text)) and not _AGE_RE.search(text)
+
+
+_ADULT_RECIPIENT_RE = re.compile(
+    r"\b(?:mom|mother|dad|father|wife|husband|grandma|grandmother|grandpa|grandfather)\b",
+    re.I,
+)
+_CHEM_RE = re.compile(
+    r"\b(?:bleach|ammonia|vinegar|hydrogen peroxide|rubbing alcohol|drain cleaner)\b"
+    r"(?!\s*[- ]?free)",
+    re.I,
+)
+_MIX_RE = re.compile(r"\b(?:mix|combine|blend|pour|add)\w*\b|\btogether\b", re.I)
+_INGEST_RE = re.compile(r"\b(?:drink|ingest|swallow|eat)\w*\b", re.I)
+_CLEANING_PRODUCT_RE = re.compile(r"\b(?:cleaners?|chemicals?|detergents?)\b", re.I)
+
+
+def _deterministic_safety_flags(text: str) -> list[str]:
+    chemicals = {match.group(0).lower() for match in _CHEM_RE.finditer(text)}
+    flags = []
+    if len(chemicals) >= 2 and _MIX_RE.search(text):
+        flags.append("unsafe_chemical_mixing")
+    if _INGEST_RE.search(text) and (chemicals or _CLEANING_PRODUCT_RE.search(text)):
+        flags.append("ingestion_risk")
+    return sorted(flags)
 
 
 def _price_from_text(*texts: str) -> float | None:
@@ -492,6 +608,56 @@ def build_nodes(mcp: MCPToolClient) -> dict:
             prompt, RouterOutput, node="router", context={"transcript": transcript}
         )
         router = out.model_dump()
+        constraints = router["constraints"] = router.get("constraints") or {}
+        dropped: list[str] = []
+        spoken_norm = _norm(transcript)
+
+        for key in ("brand", "category", "material"):
+            value = constraints.get(key)
+            if value and _norm(str(value)) not in spoken_norm:
+                dropped.append(f"{key}={value!r} (not in the utterance)")
+                constraints[key] = None
+        if constraints.get("budget") is not None and not _budget_is_grounded(transcript):
+            dropped.append(f"budget={constraints['budget']!r} (no price cue in the utterance)")
+            constraints["budget"] = None
+        if constraints.get("eco_friendly") is True and not _ECO_REQUEST_RE.search(transcript):
+            dropped.append("eco_friendly=True (no eco preference in the utterance)")
+            constraints["eco_friendly"] = None
+
+        explicit_material = _extract_material(transcript)
+        if explicit_material:
+            if constraints.get("material") != explicit_material:
+                dropped.append(
+                    f"material={constraints.get('material')!r} replaced with explicit "
+                    f"{explicit_material!r}"
+                )
+            constraints["material"] = explicit_material
+
+        llm_needs_live = bool(router.get("needs_live"))
+        llm_task = router.get("task")
+        router["needs_live"] = bool(_LIVE_RE.search(transcript))
+        if router["needs_live"]:
+            router["task"] = "price_check"
+        router["safety_flags"] = sorted(set(
+            (router.get("safety_flags") or []) + _deterministic_safety_flags(transcript)
+        ))
+
+        inferred_product_type = None
+        if (
+            not constraints.get("product_type")
+            and not router["safety_flags"]
+            and not state.get("prior_constraints")
+        ):
+            inferred_product_type = " ".join(dict.fromkeys(_query_terms(transcript))) or None
+            constraints["product_type"] = inferred_product_type
+        router["grounding_notes"] = {
+            "dropped_constraints": dropped,
+            "inferred_product_type": inferred_product_type,
+            "llm_needs_live": llm_needs_live,
+            "enforced_needs_live": router["needs_live"],
+            "llm_task": llm_task,
+            "enforced_task": router.get("task"),
+        }
 
         # Refinement: fold this utterance's constraints onto the session's.
         prior = state.get("prior_constraints") or None
@@ -658,15 +824,29 @@ def build_nodes(mcp: MCPToolClient) -> dict:
         transcript = state.get("effective_query") or state["transcript"]
         plan = state["plan"]
         f = plan.get("retrieval_filters") or {}
-        args: dict[str, Any] = {"query": transcript, "top_k": settings.RAG_TOP_K}
+        router_c = (state.get("router") or {}).get("constraints") or {}
+        args: dict[str, Any] = {
+            "query": transcript,
+            "top_k": max(settings.RAG_TOP_K, 30),
+        }
         for key in ("max_price", "category", "material", "eco_friendly"):
             if f.get(key) not in (None, ""):
                 args[key] = f[key]
 
         resp = await mcp.call("rag.search", args)
         candidates = [r for r in resp.get("results", []) if r.get("doc_id")]
+        anchor_query = str(router_c.get("product_type") or state["transcript"])
+        anchors = _lexical_anchor_terms(anchor_query, candidates)
+        candidates = [row for row in candidates if _matches_anchor(row, anchors)]
+        before_material = len(candidates)
+        candidates = [row for row in candidates if _matches_material(row, f.get("material"))]
+        excluded_for_material = before_material - len(candidates)
+        excluded_for_recipient = 0
+        if _ADULT_RECIPIENT_RE.search(state["transcript"]):
+            kept = [row for row in candidates if not _is_child_product(row)]
+            excluded_for_recipient = len(candidates) - len(kept)
+            candidates = kept
 
-        router_c = (state.get("router") or {}).get("constraints") or {}
         want = max(1, min(int((state.get("router") or {}).get("top_k") or 3), 8))
 
         # --- HARD-constraint guard -----------------------------------------
@@ -694,6 +874,11 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                 probe_args = {k: v for k, v in args.items() if k != "max_price"}
                 probe = await mcp.call("rag.search", probe_args)
                 probe_rows = [r for r in probe.get("results", []) if r.get("doc_id")]
+                probe_anchors = _lexical_anchor_terms(anchor_query, probe_rows)
+                probe_rows = [r for r in probe_rows if _matches_anchor(r, probe_anchors)]
+                probe_rows = [r for r in probe_rows if _matches_material(r, f.get("material"))]
+                if _ADULT_RECIPIENT_RE.search(state["transcript"]):
+                    probe_rows = [r for r in probe_rows if not _is_child_product(r)]
                 prices = [r["price"] for r in probe_rows
                           if isinstance(r.get("price"), (int, float))]
                 if probe_rows:
@@ -723,7 +908,7 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                 prompt, RerankOutput, node="reranker", context={"candidates": candidates}
             )
             # Deterministic validation: ranked ids must be a subset of the
-            # candidates; dedupe; top up to 3 by retrieval score.
+            # grounded candidates. Never add rows the reranker rejected.
             by_id = {c["doc_id"]: c for c in candidates}
             ranked, seen = [], set()
             for doc_id in out.ranked_doc_ids:
@@ -733,13 +918,6 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                 if len(ranked) == want:
                     break
             hallucinated = [d for d in out.ranked_doc_ids if d not in by_id]
-            if len(ranked) < want:
-                for c in sorted(candidates, key=lambda r: -(r.get("score") or 0)):
-                    if c["doc_id"] not in seen:
-                        ranked.append(c)
-                        seen.add(c["doc_id"])
-                    if len(ranked) == want:
-                        break
             # Deterministic audience guard, applied after the LLM rerank so the
             # outcome is guaranteed rather than hoped for.
             ranked, demoted = demote_child_products(ranked, transcript, router_c)
@@ -782,6 +960,8 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                     "relevance_floor": resp.get("relevance_floor"),
                     "dropped_below_floor": resp.get("dropped_below_floor"),
                     "error": resp.get("error"),
+                    "excluded_for_recipient": excluded_for_recipient,
+                    "excluded_for_material": excluded_for_material,
                     "candidates": [_slim(c, keep_features=120) for c in candidates],
                     "rerank": rerank_info or None,
                 },
@@ -806,7 +986,7 @@ def build_nodes(mcp: MCPToolClient) -> dict:
         # the user never asked for.
         if state.get("no_match"):
             return "answer"
-        if not state.get("candidates"):
+        if not state.get("top_picks"):
             return "web_fallback"
         if "web.search" in (state.get("plan", {}).get("sources") or []):
             return "web_compare"
@@ -853,11 +1033,14 @@ def build_nodes(mcp: MCPToolClient) -> dict:
     # ---- 5b. Web fallback (private catalog had no match) -------------------
     async def web_fallback_node(state: dict) -> dict:
         transcript = state["transcript"]
+        filters = ((state.get("plan") or {}).get("retrieval_filters") or {})
+        max_price = filters.get("max_price")
+        material = filters.get("material")
         args = {"query": f"{transcript} buy price", "max_results": 6}
         resp = await mcp.call("web.search", args)
-        rows = []
+        raw_rows = []
         for i, r in enumerate(resp.get("results", [])):
-            rows.append({
+            raw_rows.append({
                 "doc_id": f"web-{i + 1}",
                 "sku": f"web-{i + 1}",
                 "title": r.get("title"),
@@ -870,6 +1053,13 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                 "availability": r.get("availability"),
                 "source": "web",
             })
+        constraints = ((state.get("router") or {}).get("constraints") or {})
+        anchor_query = str(constraints.get("product_type") or transcript)
+        anchors = _lexical_anchor_terms(anchor_query, raw_rows)
+        rows = [
+            row for row in raw_rows
+            if _web_row_allowed(row, anchors, max_price, material)
+        ]
         web = {"mode": "fallback", **resp}
         return {
             "web": web,
@@ -997,7 +1187,7 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                 "reconciliation": reconciliation,
                 "live_results": (state.get("web") or {}).get("results", [])[:5],
             }
-        criteria = (state.get("plan") or {}).get("comparison_criteria") or ["price", "rating"]
+        criteria = (state.get("plan") or {}).get("comparison_criteria") or ["price", "features"]
 
         prompt = full_prompt(
             "answerer",

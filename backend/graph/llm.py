@@ -59,8 +59,15 @@ async def call_structured(
     """
     if settings.LLM_PROVIDER == "mock":
         return _mock_structured(schema, context or {})
-    model = get_chat_model().with_structured_output(schema)
-    return await model.ainvoke(prompt)
+    kwargs = {"method": "function_calling"} if settings.LLM_PROVIDER == "openai" else {}
+    model = get_chat_model().with_structured_output(schema, **kwargs)
+    result = await model.ainvoke(prompt)
+    if result is None:
+        raise RuntimeError(
+            f"{node} returned no structured output from "
+            f"{settings.LLM_PROVIDER}:{settings.LLM_MODEL}"
+        )
+    return result
 
 
 # --------------------------------------------------------------------------

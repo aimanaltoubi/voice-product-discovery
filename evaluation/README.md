@@ -1,0 +1,54 @@
+# Evaluation - Measured Accuracy
+
+This folder holds the standalone evaluation for the project:
+
+- evaluation.ipynb - runs a fixed set of graded cases through the real pipeline and scores every model
+- evaluation_report.json and evaluation_cases.csv - written by the notebook after a run
+- this README - what is measured plus where the numbers live
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aimanaltoubi/voice-product-discovery/blob/main/evaluation/evaluation.ipynb)
+
+## What is measured
+
+- speech to text: WER and CER against known reference sentences plus an accent version (the Whisper paper measures)
+- router: accuracy + precision and recall and F1 per class + a confusion matrix + constraint extraction accuracy
+- retrieval: Precision at 3 + MRR + NDCG at 3 on labeled probe queries (classic ranking measures per Manning et al.)
+- answers: faithfulness and relevance scored by a judge model in the RAGAS style (Es et al. 2023)
+- cross-cutting: latency budgets per stage (router and safety and retrieval 8 s - answer 12 s) and a pass or fail verdict per case rolled up by category
+
+The grading catalog is the bundled 24-product set because exact grading needs an exact answer key. One line in Part 2 of the notebook switches it to the Kaggle dataset.
+
+## How to run
+
+- open the badge above (or the notebook file via the Colab GitHub tab)
+- add a Colab secret named OPENAI_API_KEY with Notebook access on
+- Runtime then Run all - about ten minutes
+- then File then Save a copy in GitHub with the file path evaluation/evaluation.ipynb so the executed evidence is stored here
+
+## Latest measured results
+
+Fill the result column from Part 10 of the saved run. The executed notebook in this folder is the source of truth for every number.
+
+| measure | result | target |
+|---|---|---|
+| ASR WER (average of 4 sentences) | - | 10% or less |
+| ASR CER (average of 4 sentences) | - | 5% or less |
+| ASR WER accent | - | 20% or less |
+| Router accuracy | - | 90% or more |
+| Router macro F1 | - | 0.85 or more |
+| Constraint extraction accuracy | - | 85% or more |
+| Retrieval Precision@3 | - | 0.8 or more |
+| Retrieval MRR | - | 0.8 or more |
+| Retrieval NDCG@3 | - | 0.8 or more |
+| Answer faithfulness (judge) | - | 90% or more |
+| Answer relevance (judge) | - | 0.8 or more |
+| Latency budget compliance | - | 90% or more |
+| Case accuracy - overall | - | 90% or more |
+
+## Limitations stated plainly
+
+- the grading catalog is 24 products. Exact but small. The Kaggle option trades label exactness for scale
+- the judge is itself a model. Treat its scores as strong signal rather than ground truth
+- live cases depend on what the web returns that session
+
+Note: the badge and the notebook's first line point at aimanaltoubi/voice-product-discovery. If the project lives under a different repository name change both in the same way.

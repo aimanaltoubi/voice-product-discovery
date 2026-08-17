@@ -18,13 +18,6 @@ This folder holds the standalone evaluation for the project:
 
 The grading catalog is the bundled 24-product set because exact grading needs an exact answer key. One line in Part 2 of the notebook switches it to the Kaggle dataset.
 
-## How to run
-
-- open the badge above (or the notebook file via the Colab GitHub tab)
-- add a Colab secret named OPENAI_API_KEY with Notebook access on
-- Runtime then Run all - about ten minutes
-- then File then Save a copy in GitHub with the file path evaluation/evaluation.ipynb so the executed evidence is stored here
-
 ## Latest measured results
 
 Fill the result column from Part 10 of the saved run. The executed notebook in this folder is the source of truth for every number.
@@ -44,11 +37,3 @@ Fill the result column from Part 10 of the saved run. The executed notebook in t
 | Answer relevance (judge) | - | 0.8 or more |
 | Latency budget compliance | - | 90% or more |
 | Case accuracy - overall | - | 90% or more |
-
-## Limitations stated plainly
-
-- the grading catalog is 24 products. Exact but small. The Kaggle option trades label exactness for scale
-- the judge is itself a model. Treat its scores as strong signal rather than ground truth
-- live cases depend on what the web returns that session
-
-Note: the badge and the notebook's first line point at aimanaltoubi/voice-product-discovery. If the project lives under a different repository name change both in the same way.

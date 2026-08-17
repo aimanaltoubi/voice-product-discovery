@@ -27,87 +27,13 @@ Cloud demo no local setup is needed=
 
 ---
 
-## Architecture (short version)
-
-```
-Browser (React) ── /api/transcribe ─▶ Whisper ASR (faster-whisper | OpenAI)
-      │                /api/discover ─▶ LangGraph:
-      │                                router → [safety] → planner
-      │                                  → retrieve(rag.search + rerank)
-      │                                  → [web_compare → reconcile | web_fallback]
-      │                                  → answerer/critic
-      │                /api/speak ────▶ TTS (edge-tts | OpenAI) → mp3
-      │                                        │
-      └── step log · table · citations   MCP client ── stdio JSON-RPC ──▶ MCP server
-                                                        web.search (cache+ratelimit+allowlist)
-                                                        rag.search (Chroma hybrid retrieval)
-```
-
 Full detail: [`docs/architecture.md`](docs/architecture.md) ·
 tool contracts: [`docs/mcp_schemas.md`](docs/mcp_schemas.md) ·
 guardrails: [`docs/safety.md`](docs/safety.md) ·
 data pipeline: [`data/README.md`](data/README.md) ·
 prompts + node mapping: [`prompts/README.md`](prompts/README.md)
 
-## Quickstart
-
-Prereqs: Python 3.11+ (3.12 tested), Node 18+, a microphone-capable browser.
-
-```bash
-# 1) clone + enter
-git clone <this-repo> && cd voice-product-discovery
-
-# 2) backend environment
-python3.12 -m venv .venv
-.venv/bin/pip install -r backend/requirements.txt
-
-# 3) frontend dependencies
-cd frontend && npm install && cd ..
-
-# 4) configuration — copy the template, then add your key
-cp .env.example .env
-#    edit .env and set:
-#      LLM_PROVIDER=openai
-#      LLM_MODEL=gpt-4o-mini
-#      OPENAI_API_KEY=sk-...        <- your key; .env is gitignored
-#    LLM_PROVIDER=mock runs keyless for offline development (no real LLM).
-#    NEVER put a real key in .env.example — that file IS committed.
-
-# 5) private catalog — download the Amazon Product Dataset 2020
-bash scripts/fetch_amazon_2020.sh          # needs Kaggle credentials; see data/README.md
-
-# 6) preprocess + build the Chroma index (~3 min on CPU, first run also
-#    downloads the ~80 MB MiniLM embedding model)
-cd backend && python -m rag.ingest \
-    --csv "../data/raw/<the-kaggle-file>.csv" \
-    --max-per-category 500 --require-price --skip-uncategorized --require-real
-cd ..
-
-# 7) verify REAL data was indexed (exit 0 = real Amazon records)
-.venv/bin/python scripts/verify_index.py
-
-# 8) start the backend (stock asyncio loop is required for MCP stdio)
-cd backend && ../.venv/bin/python -m uvicorn app.main:app --port 8000 --loop asyncio
-
-# 9) start the frontend in a second terminal
-cd frontend && npm run dev        # http://localhost:5173
-```
-
-No dataset yet? `cd backend && python -m rag.ingest --sample` builds a small
-synthetic catalog so the pipeline runs end-to-end. The UI labels it
-**Sample catalog** so it can never be mistaken for real Amazon data.
-
-Confirm the backend is healthy and using the real catalog:
-
-```bash
-curl -s localhost:8000/api/health   # -> "llm":"openai:gpt-4o-mini", "is_real_data":true
-```
-
-> `run.sh` starts both servers, but it word-splits `$PY` — if your checkout path
-> contains a space, start the two processes separately as in steps 8–9.
-
 ## Architecture (as implemented)
-
 ```mermaid
 flowchart TD
   MIC["🎤 Browser mic / text input"] --> ASR["/api/transcribe<br/>faster-whisper (local)"]

@@ -7,9 +7,8 @@ Design notes
 ------------
 - Nodes are built by `build_nodes(mcp)` so they close over the MCP client;
   all tool access goes through the Model Context Protocol, never by import.
-- Every node appends an entry to `steps` (name/input/output/timestamp) —
-  that list is rendered verbatim by the UI's Agent Step Log. Step names
-  match the frontend's STEP_LABELS map.
+- Every node appends an entry to `steps` (name/input/output/timestamp); the
+  frontend's AgentTrace renders the backend-provided labels and details.
 - LLM outputs are validated against the Pydantic schemas in state.py and
   then re-checked deterministically (planner rubric enforcement, rerank
   subset check, answer grounding check). The LLM proposes; code verifies.
@@ -17,7 +16,6 @@ Design notes
 
 from __future__ import annotations
 
-import difflib
 import json
 import re
 from datetime import datetime, timezone
@@ -35,6 +33,12 @@ from graph.state import (
 from mcp_server.client import MCPToolClient
 
 PROMPT_PREVIEW_CHARS = 800
+PRICE_DISCREPANCY_RATIO = 0.15
+
+# How many retrieval candidates the LLM reranker actually sees. Retrieval asks
+# rag.search for 30 so the deterministic filters have room; the reranker gets
+# only the strongest slice of that.
+RERANK_SHORTLIST = 10
 
 
 # --------------------------------------------------------------------------
@@ -62,10 +66,6 @@ def step(name: str, input: Any, output: Any, *, label: str = "", detail: str = "
         "output": output,
         "timestamp": _now(),
     }
-
-
-def _fmt_price(v: Any) -> str:
-    return f"${v:,.2f}" if isinstance(v, (int, float)) else "—"
 
 
 # --- grounded match reasons ------------------------------------------------
@@ -104,17 +104,36 @@ _REPLACE_FIELDS = (
     "product_type", "budget", "size", "audience", "use_case",
     "brand", "category", "material", "eco_friendly",
 )
+_PRODUCT_DEPENDENT_FIELDS = (
+    "category", "brand", "material", "size", "use_case",
+    "eco_friendly", "qualitative_features",
+)
 
 
 def merge_constraints(prior: dict | None, new: dict | None) -> dict:
-    merged = dict(prior or {})
+    prior = prior or {}
+    new = new or {}
+    merged = dict(prior)
+    pivot = (
+        prior.get("product_type") and new.get("product_type")
+        and _norm(str(prior["product_type"])) != _norm(str(new["product_type"]))
+    )
+    if pivot:
+        # A new product invalidates product-specific constraints from the old one;
+        # budget and audience describe the shopper and remain useful.
+        for field in _PRODUCT_DEPENDENT_FIELDS:
+            merged.pop(field, None)
     for field in _REPLACE_FIELDS:
-        value = (new or {}).get(field)
+        value = new.get(field)
         if value not in (None, "", []):
             merged[field] = value
+    # A generic refinement may mention "toy" while the retained product type is
+    # still "puzzle"; keep its matching category unless product_type changed too.
+    if merged.get("product_type") == prior.get("product_type") and prior.get("category"):
+        merged["category"] = prior["category"]
     feats = list(merged.get("qualitative_features") or [])
     seen = {str(f).strip().lower() for f in feats}
-    for f in (new or {}).get("qualitative_features") or []:
+    for f in new.get("qualitative_features") or []:
         key = str(f).strip().lower()
         if key and key not in seen:
             feats.append(f)
@@ -144,11 +163,6 @@ def diff_constraints(prior: dict | None, merged: dict) -> list[str]:
              if str(f).lower() not in before_f]
     if added:
         changes.append("Added: " + ", ".join(added))
-    removed = [f for f in (prior.get("qualitative_features") or [])
-               if str(f).lower() not in {str(x).lower()
-                                         for x in (merged.get("qualitative_features") or [])}]
-    if removed:
-        changes.append("Removed: " + ", ".join(removed))
     return changes
 
 
@@ -240,7 +254,7 @@ def _evidence_blob(row: dict) -> str:
     """The literal text a chip is allowed to cite."""
     return " ".join(
         str(row.get(k) or "")
-        for k in ("title", "features", "ingredients", "category")
+        for k in ("title", "features", "ingredients", "specification", "category")
     ).lower()
 
 
@@ -398,6 +412,75 @@ def match_evidence(row: dict, constraints: dict) -> dict:
     }
 
 
+# Colorway variants share everything but the tail of the title:
+#   "Heritage Club Ultra Soft – Sierra – … – Alternative Microfiber, Mint"
+#   "Heritage Club Ultra Soft – Sierra – … – Alternative Microfiber – –, Purple"
+# Same product, same price, two doc_ids. Matching on the leading words plus the
+# price collapses them without touching genuinely different products, which
+# diverge long before the eighth word.
+_VARIANT_KEY_WORDS = 8
+
+
+def dedupe_listings(rows: list[dict]) -> list[dict]:
+    """Keep one row per product, dropping same-price colorway variants.
+
+    Rows arrive in retrieval order, so the first occurrence is the strongest
+    match. Without this a shopper sees the same comforter in two colors filling
+    two of three comparison slots.
+    """
+    seen: set[tuple[str, Any]] = set()
+    out: list[dict] = []
+    for row in rows:
+        head = " ".join(_norm(str(row.get("title") or "")).split()[:_VARIANT_KEY_WORDS])
+        key = (head, row.get("price"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
+
+
+def rank_grounded(rows: list[dict]) -> list[dict]:
+    """Prefer verified constraint matches, then the private retrieval score."""
+    return sorted(
+        rows,
+        key=lambda row: (
+            -(row.get("matched_constraints") or 0),
+            -(row.get("score") or 0),
+        ),
+    )
+
+
+def top_up_ranked(
+    shortlist: list[dict], ranked_doc_ids: list[str], want: int,
+) -> tuple[list[dict], int, list[str]]:
+    if not ranked_doc_ids:
+        return [], 0, []
+    by_id = {row["doc_id"]: row for row in shortlist}
+    ranked: list[dict] = []
+    seen: set[str] = set()
+    for doc_id in ranked_doc_ids:
+        if doc_id in by_id and doc_id not in seen:
+            ranked.append(by_id[doc_id])
+            seen.add(doc_id)
+        if len(ranked) == want:
+            break
+    before = len(ranked)
+    for row in shortlist:
+        if len(ranked) == want:
+            break
+        if row["doc_id"] not in seen:
+            ranked.append(row)
+            seen.add(row["doc_id"])
+    return ranked, len(ranked) - before, [d for d in ranked_doc_ids if d not in by_id]
+
+
+def live_price_missing(needs_live: bool, reconciliation: dict | None, doc_id: str) -> bool:
+    match = ((reconciliation or {}).get("matches") or {}).get(doc_id) or {}
+    return bool(needs_live and reconciliation is not None
+                and not isinstance(match.get("web_price"), (int, float)))
+
+
 def _preview(prompt: str) -> str:
     return prompt if len(prompt) <= PROMPT_PREVIEW_CHARS else prompt[:PROMPT_PREVIEW_CHARS] + " …[truncated]"
 
@@ -411,9 +494,13 @@ def _slim(row: dict, *, keep_features: int = 220) -> dict:
         "brand": row.get("brand"),
         "price": row.get("price"),
         "rating": row.get("rating"),
+        # Retrieval rank is evidence too: without it the reranker cannot tell
+        # the vector-similarity winner from the 19th-best row.
+        "score": row.get("score"),
         "price_per_oz": row.get("price_per_oz"),
         "eco_friendly": row.get("eco_friendly"),
         "ingredients": (row.get("ingredients") or None),
+        "specification": (row.get("specification") or None),
         "features": (row.get("features") or "")[:keep_features] or None,
     }
     # NB: `image` is deliberately NOT included — _slim feeds the rerank and
@@ -430,7 +517,222 @@ def _norm(text: str) -> str:
     return re.sub(r"[^a-z0-9 ]+", " ", (text or "").lower()).strip()
 
 
+_QUERY_STOPWORDS = {
+    "recommend", "find", "show", "need", "want", "give", "buy", "price",
+    "compare", "best", "top", "one", "two", "three", "four", "five",
+    "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen",
+    "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen",
+    "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty",
+    "ninety", "hundred", "thousand",
+    "what", "which", "where", "when", "how", "who", "you", "your", "have",
+    "has", "any", "some", "option", "options", "looking", "look", "does",
+    "current", "latest", "right", "now", "less", "than", "under", "below", "dollar", "dollars",
+    "this", "still", "sold", "available", "being", "stock", "restock", "restocked",
+    "discontinued", "today", "these", "days", "date", "product", "products",
+    "for", "with", "the", "and", "kids", "kid", "child", "children", "mom",
+    "mother", "dad", "father", "boy", "boys", "girl", "girls",
+    "year", "years", "old", "please", "me",
+    "kit", "model", "set",
+}
+
+_MATERIAL_PATTERNS = {
+    "stainless steel": re.compile(r"\bstainless[- ]steel\b", re.I),
+    "steel": re.compile(r"\bsteel\b", re.I),
+    "wood": re.compile(r"\b(?:wood|wooden)\b", re.I),
+    "glass": re.compile(r"\bglass\b", re.I),
+    "plastic": re.compile(r"\bplastic\b(?!\s*[- ]?free\b)", re.I),
+    "ceramic": re.compile(r"\bceramic\b", re.I),
+    "silicone": re.compile(r"\bsilicone\b", re.I),
+    "aluminum": re.compile(r"\b(?:aluminum|aluminium)\b", re.I),
+    "non-toxic": re.compile(r"\bnon[- ]?toxic\b", re.I),
+}
+_MATERIAL_NEGATION_RE = re.compile(
+    r"\b(?:no|without|avoid(?:ing)?|free\s+of)(?:\s+\w+){0,2}\s*$", re.I,
+)
+def _material_match(pattern: re.Pattern, text: str) -> re.Match | None:
+    for match in pattern.finditer(text):
+        if _MATERIAL_NEGATION_RE.search(text[max(0, match.start() - 24):match.start()]):
+            continue
+        if re.match(r"\s*[- ]?free\b", text[match.end():], re.I):
+            continue
+        return match
+    return None
+
+
+def _extract_material(text: str) -> str | None:
+    return next((name for name, pattern in _MATERIAL_PATTERNS.items()
+                 if _material_match(pattern, text)), None)
+
+
+def _excluded_materials(text: str) -> set[str]:
+    excluded = set()
+    for material in _MATERIAL_PATTERNS:
+        if material == "non-toxic":
+            continue
+        term = re.escape(material).replace(r"\ ", r"[- ]")
+        if re.search(
+            rf"\b(?:{term}[- ]?free|no\s+{term}|without\s+{term}|"
+            rf"free\s+of\s+{term}|avoid(?:ing)?\s+{term})\b",
+            text, re.I,
+        ):
+            excluded.add(material)
+    return excluded
+
+
+def _explicitly_excludes_material(row: dict, material: str) -> bool:
+    evidence = " ".join(str(row.get(k) or "") for k in ("title", "features", "specification"))
+    return material in _excluded_materials(evidence)
+
+
+def _query_terms(query: str) -> list[str]:
+    for pattern in _MATERIAL_PATTERNS.values():
+        query = pattern.sub(" ", query)
+    return [
+        term for term in re.findall(r"[a-z0-9]+", query.lower())
+        if len(term) >= 3 and not term.isdigit() and term not in _QUERY_STOPWORDS
+    ]
+
+
+def _all_query_terms_present(phrase: str, text: str) -> bool:
+    wanted = set(_query_terms(phrase))
+    return bool(wanted) and wanted <= set(_query_terms(text))
+
+
+def _lexical_anchor_terms(query: str, rows: list[dict]) -> set[str]:
+    terms = set(_query_terms(query))
+    present = {
+        term for term in terms
+        if any(re.search(rf"\b{re.escape(term)}s?\b", row.get("title", ""), re.I) for row in rows)
+    }
+    return present
+
+
+def _matches_anchor(row: dict, anchors: set[str], *, require_all: bool = False) -> bool:
+    evidence = str(row.get("title") or "") if require_all else " ".join(
+        str(row.get(k) or "") for k in ("title", "features")
+    )
+    matches = [bool(re.search(rf"\b{re.escape(term)}s?\b", evidence, re.I))
+               for term in anchors]
+    return not anchors or (all(matches) if require_all else any(matches))
+
+
+def _requires_all_anchors(router: dict) -> bool:
+    return bool((router.get("constraints") or {}).get("product_type")) and not bool(
+        (router.get("grounding_notes") or {}).get("inferred_product_type")
+    )
+
+
+def _matches_all_query_terms(row: dict, terms: set[str]) -> bool:
+    title = str(row.get("title") or "")
+    return bool(terms) and all(
+        re.search(rf"\b{re.escape(term)}s?\b", title, re.I) for term in terms
+    )
+
+
+def _matches_material(row: dict, material: str | None) -> bool:
+    if not material:
+        return True
+    evidence = " ".join(str(row.get(k) or "") for k in ("title", "features", "specification"))
+    pattern = _MATERIAL_PATTERNS.get(material)
+    return bool(_material_match(pattern, evidence)) if pattern else _norm(material) in _norm(evidence)
+
+
+def _is_search_results_page(row: dict) -> bool:
+    url = str(row.get("url") or "")
+    return bool(re.search(r"/(?:s|search)(?:[/?]|$)|[?&](?:k|q)=", url, re.I))
+
+
+def _web_row_allowed(
+    row: dict, anchors: set[str], max_price: float | None, material: str | None = None,
+    excluded_materials: set[str] | None = None, require_all: bool = False,
+) -> bool:
+    return (not _is_search_results_page(row)
+            and _matches_anchor(row, anchors, require_all=require_all)
+            and _matches_material(row, material)
+            and all(_explicitly_excludes_material(row, m)
+                    for m in (excluded_materials or set()))) and (
+        max_price is None
+        or isinstance(row.get("price"), (int, float)) and row["price"] <= max_price
+    )
+
+
 _PRICE_RE = re.compile(r"\$\s?(\d{1,4}(?:[.,]\d{2})?)")
+_RATING_REQUEST_RE = re.compile(
+    r"\b(?:highest|best|top)[- ]?rated\b|\bhighest\s+rating\b|\brating\b", re.I,
+)
+_REVIEW_REQUEST_RE = re.compile(r"\b(?:customer|product|user)\s+reviews?\b", re.I)
+_LIVE_RE = re.compile(
+    r"\b(?:current(?:ly)?|latest|right now|today|these days|in stock|out of stock|"
+    r"restock\w*|availability|available now|still (?:sold|available|being sold)|"
+    r"discontinued|live price|up to date)\b",
+    re.I,
+)
+
+
+def _rating_from_text(*texts: str) -> float | None:
+    for text in texts:
+        match = re.search(
+            r"\b([0-5](?:\.\d)?)\s*(?:out\s+of\s+5|/\s*5|stars?)\b",
+            text or "", re.I,
+        )
+        if match:
+            return float(match.group(1))
+    return None
+_MONEY_RE = re.compile(
+    r"\$|\bdollars?\b|\bbucks?\b|\bprice[ds]?\b|\bbudget\b|\bcheap\w*\b|\bcost\w*\b",
+    re.I,
+)
+_LIMIT_RE = re.compile(r"\b(?:under|below|less than|up to|no more than|max(?:imum)?)\b", re.I)
+_AGE_RE = re.compile(r"\b\d+\s*(?:\+\s*)?(?:year|yr|month|mo)s?\b|\bages?\b", re.I)
+_ECO_REQUEST_RE = re.compile(
+    r"\b(?:eco(?:[- ]friendly)?|green|sustainab\w*|biodegradable|plant[- ]based|non[- ]?toxic)\b",
+    re.I,
+)
+
+
+def _budget_is_grounded(text: str) -> bool:
+    if _MONEY_RE.search(text):
+        return True
+    return bool(_LIMIT_RE.search(text)) and not _AGE_RE.search(text)
+
+
+_ADULT_RECIPIENT_RE = re.compile(
+    r"\b(?:adult|myself|mom|mother|dad|father|wife|husband|grandma|grandmother|"
+    r"grandpa|grandfather)\b",
+    re.I,
+)
+_CHEM_RE = re.compile(
+    r"\b(?:bleach|ammonia|vinegar|hydrogen peroxide|rubbing alcohol|drain cleaner)\b"
+    r"(?!\s*[- ]?free)",
+    re.I,
+)
+_MIX_RE = re.compile(r"\b(?:mix|combine|blend|pour|add)\w*\b|\btogether\b", re.I)
+_INGEST_RE = re.compile(r"\b(?:drink|ingest|swallow|eat)\w*\b", re.I)
+_CLEANING_PRODUCT_RE = re.compile(r"\b(?:cleaners?|chemicals?|detergents?)\b", re.I)
+_HARMFUL_RE = re.compile(
+    r"\b(?:build|make|use)\b.{0,40}\b(?:bomb|weapon|explosive)\b|"
+    r"\b(?:poison|harm|kill)\b.{0,30}\b(?:someone|person|people)\b",
+    re.I,
+)
+
+
+def _deterministic_safety_flags(text: str) -> list[str]:
+    chemicals = {match.group(0).lower() for match in _CHEM_RE.finditer(text)}
+    flags = []
+    if len(chemicals) >= 2 and _MIX_RE.search(text):
+        flags.append("unsafe_chemical_mixing")
+    if _INGEST_RE.search(text) and (chemicals or _CLEANING_PRODUCT_RE.search(text)):
+        flags.append("ingestion_risk")
+    if _HARMFUL_RE.search(text):
+        flags.append("harmful_intent")
+    return sorted(flags)
+
+
+def _adult_recipient_requested(text: str, constraints: dict) -> bool:
+    audience = str((constraints or {}).get("audience") or "").lower()
+    return audience in {"adult", "myself", "me", "men", "women"} or bool(
+        _ADULT_RECIPIENT_RE.search(text)
+    )
 
 
 def _price_from_text(*texts: str) -> float | None:
@@ -466,7 +768,7 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                 "constraints": c,
                 "safety_flags": [],
                 "needs_live": bool(state.get("prior_needs_live")),
-                "top_k": state.get("prior_top_k") or 3,
+                "top_k": max(1, min(int(state.get("prior_top_k") or 3), 5)),
             }
             effective = compose_query(c, transcript)
             return {
@@ -492,6 +794,82 @@ def build_nodes(mcp: MCPToolClient) -> dict:
             prompt, RouterOutput, node="router", context={"transcript": transcript}
         )
         router = out.model_dump()
+        constraints = router["constraints"] = router.get("constraints") or {}
+        dropped: list[str] = []
+        spoken_norm = _norm(transcript)
+
+        for key in ("brand", "category", "material"):
+            value = constraints.get(key)
+            grounded = not value or _norm(str(value)) in spoken_norm
+            if key == "brand" and value and not grounded:
+                grounded = _all_query_terms_present(str(value), transcript)
+            if key == "material" and value and not grounded:
+                grounded = bool(set(_norm(str(value)).split()) & set(spoken_norm.split()))
+            if value and not grounded:
+                dropped.append(f"{key}={value!r} (not in the utterance)")
+                constraints[key] = None
+        if constraints.get("budget") is not None and not _budget_is_grounded(transcript):
+            dropped.append(f"budget={constraints['budget']!r} (no price cue in the utterance)")
+            constraints["budget"] = None
+        if constraints.get("eco_friendly") is True and not _ECO_REQUEST_RE.search(transcript):
+            dropped.append("eco_friendly=True (no eco preference in the utterance)")
+            constraints["eco_friendly"] = None
+
+        explicit_material = _extract_material(transcript)
+        if explicit_material:
+            if constraints.get("material") != explicit_material:
+                dropped.append(
+                    f"material={constraints.get('material')!r} replaced with explicit "
+                    f"{explicit_material!r}"
+                )
+            constraints["material"] = explicit_material
+
+        llm_needs_live = bool(router.get("needs_live"))
+        llm_task = router.get("task")
+        rating_request = bool(_RATING_REQUEST_RE.search(transcript))
+        review_request = bool(_REVIEW_REQUEST_RE.search(transcript))
+        # Regex handles explicit high-confidence cues; the structured Router
+        # extends coverage to paraphrases the pattern list does not spell out.
+        # English-only by design: the grounding checks below compare against an
+        # ASCII-normalized transcript, so a non-English utterance would have
+        # every extracted constraint dropped as "not in the utterance".
+        router["needs_live"] = bool(
+            _LIVE_RE.search(transcript) or llm_needs_live or rating_request or review_request
+        )
+        llm_safety_flags = sorted(set(router.get("safety_flags") or []))
+        # Safety is the one axis we do not narrow: retain both the Router's
+        # judgement and exact deterministic hazards.
+        router["safety_flags"] = sorted(set(
+            llm_safety_flags + _deterministic_safety_flags(transcript)
+        ))
+        router["task"] = (
+            "safety_question" if router["safety_flags"] else
+            "rating_check" if rating_request else
+            "review_check" if review_request else
+            "price_check" if router["needs_live"] else
+            "product_recommendation"
+        )
+
+        inferred_product_type = None
+        if (
+            not constraints.get("product_type")
+            and not router["safety_flags"]
+            and not state.get("prior_constraints")
+        ):
+            inferred_product_type = " ".join(dict.fromkeys(_query_terms(transcript))) or None
+            constraints["product_type"] = inferred_product_type
+        router["grounding_notes"] = {
+            "dropped_constraints": dropped,
+            "inferred_product_type": inferred_product_type,
+            "llm_needs_live": llm_needs_live,
+            "enforced_needs_live": router["needs_live"],
+            "rating_request": rating_request,
+            "review_request": review_request,
+            "llm_task": llm_task,
+            "enforced_task": router.get("task"),
+            "llm_safety_flags": llm_safety_flags,
+            "enforced_safety_flags": router["safety_flags"],
+        }
 
         # Refinement: fold this utterance's constraints onto the session's.
         prior = state.get("prior_constraints") or None
@@ -504,6 +882,7 @@ def build_nodes(mcp: MCPToolClient) -> dict:
             if not re.search(r"\b(compare|show|top|best)\b.*\b(\d+|three|four|five)\b",
                              transcript, re.I):
                 router["top_k"] = state.get("prior_top_k") or router.get("top_k") or 3
+        router["top_k"] = max(1, min(int(router.get("top_k") or 3), 5))
 
         c = router.get("constraints") or {}
         bits = [
@@ -573,12 +952,30 @@ def build_nodes(mcp: MCPToolClient) -> dict:
     # ---- 2. Safety gate (deterministic) -----------------------------------
     async def safety_node(state: dict) -> dict:
         flags = state["router"].get("safety_flags", [])
-        refusal = (
-            "I can't help with that. Mixing or misusing household chemicals — like combining "
-            "bleach and ammonia — can release toxic gases and cause serious harm. "
-            "If exposure has happened, contact your local poison control service. "
-            "I'm happy to recommend safe, ready-made cleaning products instead."
-        )
+        if "unsafe_chemical_mixing" in flags:
+            refusal = (
+                "I can't help mix household chemicals because dangerous combinations can "
+                "release toxic gases. Follow product labels, and contact poison control if "
+                "exposure has occurred."
+            )
+        elif "ingestion_risk" in flags:
+            refusal = (
+                "I can't advise swallowing or tasting cleaning products. Do not ingest them; "
+                "follow the label and contact poison control if ingestion has occurred."
+            )
+        elif "harmful_intent" in flags:
+            refusal = (
+                "I can't help with instructions intended to harm someone. I can help with a "
+                "safe product recommendation instead."
+            )
+        else:
+            # Router-only flag: the hazard is real but unnamed by our patterns,
+            # so refuse without asserting which one it was.
+            refusal = (
+                "I can't help with that — it involves unsafe use of household products. "
+                "Follow the product label, and contact poison control if exposure has "
+                "occurred. I'm happy to recommend a safe product instead."
+            )
         answer = {"spoken_answer": refusal, "top_pick_doc_id": "", "citation_doc_ids": []}
         return {
             "blocked": True,
@@ -633,6 +1030,18 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                 f[key] = value
                 enforced.append(f"filled filter {key}={value!r} from router constraints")
 
+        # The source corpus has no ratings; code removes that unsupported
+        # criterion even if the unchanged planner prompt proposes it.
+        criteria = plan.get("comparison_criteria") or []
+        rating_request = bool((router.get("grounding_notes") or {}).get("rating_request"))
+        grounded_criteria = [c for c in criteria
+                             if rating_request or "rating" not in str(c).lower()]
+        if grounded_criteria != criteria:
+            enforced.append("removed rating criterion (not present in catalog)")
+        if rating_request and not any("rating" in str(c).lower() for c in grounded_criteria):
+            grounded_criteria.insert(0, "rating")
+        plan["comparison_criteria"] = grounded_criteria or ["price", "features"]
+
         plan["enforced_rules"] = enforced
         srcs = plan["sources"]
         detail = ("Private Amazon catalog + live web" if "web.search" in srcs
@@ -655,19 +1064,91 @@ def build_nodes(mcp: MCPToolClient) -> dict:
     # ---- 4. Retrieve via MCP rag.search + LLM rerank ----------------------
     async def retrieve_node(state: dict) -> dict:
         # Search on the accumulated intent, not the latest utterance alone.
-        transcript = state.get("effective_query") or state["transcript"]
         plan = state["plan"]
         f = plan.get("retrieval_filters") or {}
-        args: dict[str, Any] = {"query": transcript, "top_k": settings.RAG_TOP_K}
+        router = state.get("router") or {}
+        router_c = router.get("constraints") or {}
+        require_all_anchors = _requires_all_anchors(router)
+        product_type = str(router_c.get("product_type") or "")
+        transcript = (
+            state["transcript"]
+            if product_type and _norm(product_type) in _norm(state["transcript"])
+            else state.get("effective_query") or state["transcript"]
+        )
+        excluded_materials = _excluded_materials(transcript)
+        recipient_text = f"{state.get('effective_query') or ''} {state['transcript']}"
+        adult_recipient = _adult_recipient_requested(recipient_text, router_c)
+        args: dict[str, Any] = {
+            "query": transcript,
+            "top_k": max(settings.RAG_TOP_K, settings.RAG_CANDIDATE_K),
+        }
         for key in ("max_price", "category", "material", "eco_friendly"):
             if f.get(key) not in (None, ""):
                 args[key] = f[key]
 
         resp = await mcp.call("rag.search", args)
         candidates = [r for r in resp.get("results", []) if r.get("doc_id")]
+        rating_request = bool(_RATING_REQUEST_RE.search(state["transcript"]))
+        review_request = bool(_REVIEW_REQUEST_RE.search(state["transcript"]))
+        rating_catalog_unsupported = False
+        if rating_request or review_request:
+            # This corpus has neither ratings nor reviews; use live results rather
+            # than pretending catalog prose supports either request.
+            candidates = []
+            rating_catalog_unsupported = rating_request
+        spoken = state["transcript"]
+        anchor_query = (
+            spoken if product_type and _norm(product_type) in _norm(spoken)
+            else " ".join(str(v) for v in (router_c.get("brand"), product_type) if v)
+            or spoken
+        )
+        exact_terms = set(_query_terms(anchor_query))
+        category_retry = None
+        if (state.get("router") or {}).get("needs_live") and len(exact_terms) >= 2:
+            exact = [row for row in candidates if _matches_all_query_terms(row, exact_terms)]
+            if exact:
+                candidates = exact
+            elif args.get("category"):
+                retry_args = {k: v for k, v in args.items() if k != "category"}
+                retry_resp = await mcp.call("rag.search", retry_args)
+                retry_rows = [r for r in retry_resp.get("results", []) if r.get("doc_id")]
+                candidates = [
+                    row for row in retry_rows if _matches_all_query_terms(row, exact_terms)
+                ]
+                category_retry = {
+                    "reason": "live price target absent from category-filtered candidates",
+                    "terms": sorted(exact_terms),
+                    "arguments": retry_args,
+                    "result_count": len(candidates),
+                }
+                resp = retry_resp
+            else:
+                candidates = []
+        anchors = _lexical_anchor_terms(anchor_query, candidates)
+        before_product_type = len(candidates)
+        candidates = [row for row in candidates if _matches_anchor(
+            row, anchors, require_all=require_all_anchors,
+        )]
+        excluded_for_product_type = before_product_type - len(candidates)
+        before_negative_material = len(candidates)
+        candidates = [row for row in candidates if all(
+            _explicitly_excludes_material(row, material)
+            for material in excluded_materials
+        )]
+        excluded_for_negative_material = before_negative_material - len(candidates)
+        before_material = len(candidates)
+        candidates = [row for row in candidates if _matches_material(row, f.get("material"))]
+        excluded_for_material = before_material - len(candidates)
+        excluded_for_recipient = 0
+        if adult_recipient:
+            kept = [row for row in candidates if not _is_child_product(row)]
+            excluded_for_recipient = len(candidates) - len(kept)
+            candidates = kept
+        before_dupes = len(candidates)
+        candidates = dedupe_listings(candidates)
+        duplicates_dropped = before_dupes - len(candidates)
 
-        router_c = (state.get("router") or {}).get("constraints") or {}
-        want = max(1, min(int((state.get("router") or {}).get("top_k") or 3), 8))
+        want = max(1, min(int((state.get("router") or {}).get("top_k") or 3), 5))
 
         # --- HARD-constraint guard -----------------------------------------
         # Never let an over-budget row be presented as a match. rag.search
@@ -694,6 +1175,17 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                 probe_args = {k: v for k, v in args.items() if k != "max_price"}
                 probe = await mcp.call("rag.search", probe_args)
                 probe_rows = [r for r in probe.get("results", []) if r.get("doc_id")]
+                probe_anchors = _lexical_anchor_terms(anchor_query, probe_rows)
+                probe_rows = [r for r in probe_rows if _matches_anchor(
+                    r, probe_anchors, require_all=require_all_anchors,
+                )]
+                probe_rows = [r for r in probe_rows if all(
+                    _explicitly_excludes_material(r, material)
+                    for material in excluded_materials
+                )]
+                probe_rows = [r for r in probe_rows if _matches_material(r, f.get("material"))]
+                if adult_recipient:
+                    probe_rows = [r for r in probe_rows if not _is_child_product(r)]
                 prices = [r["price"] for r in probe_rows
                           if isinstance(r.get("price"), (int, float))]
                 if probe_rows:
@@ -712,42 +1204,51 @@ def build_nodes(mcp: MCPToolClient) -> dict:
         rerank_info: dict[str, Any] = {}
         top_picks: list[dict] = []
         if candidates:
-            slim = [_slim(c) for c in candidates]
+            # Give the LLM explicit, code-verified match evidence instead of
+            # asking it to infer every constraint again from catalog prose.
+            for candidate in candidates:
+                candidate.update(match_evidence(candidate, router_c))
+            # Retrieve wide (top_k 30) so the anchor/material/budget filters have
+            # room to work, but rerank narrow. Handing gpt-4o-mini ~19 rows made
+            # it lose track of individual products: its rationale degraded from
+            # naming each pick to a single generic sentence, and the vector-#1 row
+            # fell out of the top 3 entirely. The tail is already the weakest part
+            # of a similarity-ordered list, so cutting it costs nothing.
+            shortlist = candidates[:RERANK_SHORTLIST]
+            slim = [{**_slim(c), "match_reasons": c["match_reasons"]} for c in shortlist]
             prompt = full_prompt(
                 "reranker",
                 transcript=transcript,
+                top_n=want,
                 criteria_json=json.dumps(plan.get("comparison_criteria") or []),
                 candidates_json=json.dumps(slim, indent=1),
             )
             out: RerankOutput = await call_structured(
-                prompt, RerankOutput, node="reranker", context={"candidates": candidates}
+                prompt, RerankOutput, node="reranker",
+                context={"candidates": shortlist, "top_k": want},
             )
             # Deterministic validation: ranked ids must be a subset of the
-            # candidates; dedupe; top up to 3 by retrieval score.
-            by_id = {c["doc_id"]: c for c in candidates}
-            ranked, seen = [], set()
-            for doc_id in out.ranked_doc_ids:
-                if doc_id in by_id and doc_id not in seen:
-                    ranked.append(by_id[doc_id])
-                    seen.add(doc_id)
-                if len(ranked) == want:
-                    break
-            hallucinated = [d for d in out.ranked_doc_ids if d not in by_id]
-            if len(ranked) < want:
-                for c in sorted(candidates, key=lambda r: -(r.get("score") or 0)):
-                    if c["doc_id"] not in seen:
-                        ranked.append(c)
-                        seen.add(c["doc_id"])
-                    if len(ranked) == want:
-                        break
+            # shortlist the reranker was actually shown.
+            # Top up by retrieval score. A short model output does not mean the other
+            # rows were rejected" — and when the model returns only unusable ids
+            # the alternative is discarding a healthy candidate set and falling
+            # back to live web search the user never asked for.
+            ranked, topped_up, hallucinated = top_up_ranked(
+                shortlist, out.ranked_doc_ids, want,
+            )
             # Deterministic audience guard, applied after the LLM rerank so the
             # outcome is guaranteed rather than hoped for.
+            ranked = rank_grounded(ranked)
             ranked, demoted = demote_child_products(ranked, transcript, router_c)
             top_picks = ranked
             rerank_info = {
                 "ranked_doc_ids": [r["doc_id"] for r in ranked],
                 "rationale": out.rationale,
                 "prompt_file": "prompts/reranker.md",
+                "shortlist_size": len(shortlist),
+                "topped_up_by_score": topped_up or None,
+                "candidates_seen": f"{len(shortlist)} of {len(candidates)} "
+                                   f"(top {RERANK_SHORTLIST} by retrieval score)",
             }
             if hallucinated:
                 rerank_info["dropped_unknown_doc_ids"] = hallucinated
@@ -756,10 +1257,6 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                 rerank_info["audience_rule"] = (
                     "no child signal in the request — kid-targeted rows moved "
                     "below general-audience rows (demoted, not removed)")
-
-            # Attach evidence-backed chips to every surviving pick.
-            for p in top_picks:
-                p.update(match_evidence(p, router_c))
 
         detail = (f"MCP → rag.search · {len(candidates)} candidates found"
                   if candidates else "MCP → rag.search · no qualifying products")
@@ -778,10 +1275,20 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                     "no_match": no_match,
                     "result_count": len(candidates),
                     "resolved_category": resp.get("resolved_category"),
+                    "category_family": resp.get("category_family"),
+                    "category_retry": category_retry,
+                    "rating_catalog_unsupported": rating_catalog_unsupported,
+                    "review_catalog_unsupported": review_request,
                     "relaxations": resp.get("relaxations"),
                     "relevance_floor": resp.get("relevance_floor"),
                     "dropped_below_floor": resp.get("dropped_below_floor"),
                     "error": resp.get("error"),
+                    "excluded_for_recipient": excluded_for_recipient,
+                    "excluded_materials": sorted(excluded_materials),
+                    "excluded_for_negative_material": excluded_for_negative_material,
+                    "excluded_for_product_type": excluded_for_product_type,
+                    "excluded_for_material": excluded_for_material,
+                    "duplicate_listings_dropped": duplicates_dropped,
                     "candidates": [_slim(c, keep_features=120) for c in candidates],
                     "rerank": rerank_info or None,
                 },
@@ -806,7 +1313,7 @@ def build_nodes(mcp: MCPToolClient) -> dict:
         # the user never asked for.
         if state.get("no_match"):
             return "answer"
-        if not state.get("candidates"):
+        if not state.get("top_picks"):
             return "web_fallback"
         if "web.search" in (state.get("plan", {}).get("sources") or []):
             return "web_compare"
@@ -853,27 +1360,51 @@ def build_nodes(mcp: MCPToolClient) -> dict:
     # ---- 5b. Web fallback (private catalog had no match) -------------------
     async def web_fallback_node(state: dict) -> dict:
         transcript = state["transcript"]
-        args = {"query": f"{transcript} buy price", "max_results": 6}
+        filters = ((state.get("plan") or {}).get("retrieval_filters") or {})
+        max_price = filters.get("max_price")
+        material = filters.get("material")
+        rating_request = bool(_RATING_REQUEST_RE.search(transcript))
+        review_request = bool(_REVIEW_REQUEST_RE.search(transcript))
+        suffix = ("product rating reviews" if rating_request else
+                  "customer reviews" if review_request else "buy price")
+        args = {"query": f"{transcript} {suffix}", "max_results": 6}
         resp = await mcp.call("web.search", args)
-        rows = []
+        raw_rows = []
         for i, r in enumerate(resp.get("results", [])):
-            rows.append({
+            raw_rows.append({
                 "doc_id": f"web-{i + 1}",
                 "sku": f"web-{i + 1}",
                 "title": r.get("title"),
                 "brand": None,
                 "price": r.get("price") if isinstance(r.get("price"), (int, float))
                          else _price_from_text(r.get("snippet", ""), r.get("title", "")),
-                "rating": None,
+                "rating": _rating_from_text(r.get("snippet", ""), r.get("title", "")),
                 "features": r.get("snippet"),
                 "url": r.get("url"),
                 "availability": r.get("availability"),
                 "source": "web",
             })
+        constraints = ((state.get("router") or {}).get("constraints") or {})
+        require_all_anchors = _requires_all_anchors(state.get("router") or {})
+        excluded_materials = _excluded_materials(
+            state.get("effective_query") or state["transcript"]
+        )
+        anchor_query = str(constraints.get("product_type") or transcript)
+        anchors = _lexical_anchor_terms(anchor_query, raw_rows)
+        rows = [
+            row for row in raw_rows
+            if _web_row_allowed(
+                row, anchors, max_price, material,
+                excluded_materials, require_all_anchors,
+            )
+            and (not rating_request or isinstance(row.get("rating"), (int, float)))
+        ]
         web = {"mode": "fallback", **resp}
         return {
             "web": web,
-            "top_picks": rows[:3],
+            "top_picks": rows[:max(1, min(int(
+                ((state.get("router") or {}).get("top_k") or 3)
+            ), 5))],
             "mode": "web_fallback",
             "steps": [step(
                 "web.search",
@@ -881,7 +1412,9 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                     "tool": "web.search",
                     "transport": "MCP (stdio)",
                     "arguments": args,
-                    "reason": "no_private_matches — falling back to live web results",
+                    "plan_sources": (state.get("plan") or {}).get("sources") or [],
+                    "reason": "private catalog returned 0 rows — graph fallback policy, "
+                              "not a planner decision",
                 },
                 {
                     "provider": resp.get("provider"),
@@ -927,10 +1460,11 @@ def build_nodes(mcp: MCPToolClient) -> dict:
             }
             cat_price = pick.get("price")
             if isinstance(cat_price, (int, float)) and isinstance(web_price, (int, float)) and cat_price:
-                delta_pct = round(abs(web_price - cat_price) / cat_price * 100, 1)
+                delta_ratio = abs(web_price - cat_price) / cat_price
+                delta_pct = round(delta_ratio * 100, 1)
                 entry["catalog_price"] = cat_price
                 entry["price_delta_pct"] = delta_pct
-                if delta_pct > 15:
+                if delta_ratio > PRICE_DISCREPANCY_RATIO:
                     entry["discrepancy"] = True
                     flags.append(
                         f"{pick.get('title')}: live price ${web_price:.2f} differs from "
@@ -948,13 +1482,15 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                 {
                     "method": "deterministic: >=2 distinctive shared tokens (generic "
                               "category words and 'Unknown' brand excluded); "
-                              "price delta > 15% flagged",
+                              f"price delta > {PRICE_DISCREPANCY_RATIO:.0%} flagged",
+                    "live_query_scope": "top_pick_only",
                     "catalog_picks": [p.get("title") for p in picks],
                     "web_titles": [r.get("title") for r in web_results],
                 },
                 reconciliation,
                 label="Matching live results",
-                detail=(f"{len(matches)} of {len(picks)} catalog picks matched to a live listing"
+                detail=("Live lookup covered the top-ranked catalog pick only · "
+                        f"{len(matches)} exact match{'es' if len(matches) != 1 else ''}"
                         + (f" · {len(flags)} price discrepancy flagged" if flags else "")),
             )],
         }
@@ -989,6 +1525,38 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                     detail="No qualifying products — reporting the gap instead of recommending",
                 )],
             }
+        if not picks:
+            if _RATING_REQUEST_RE.search(state["transcript"]):
+                spoken = (
+                    "The private catalog does not include ratings, and I couldn't verify "
+                    "comparable product ratings from live sources, so I can't determine "
+                    "the highest-rated option."
+                )
+            elif _REVIEW_REQUEST_RE.search(state["transcript"]):
+                spoken = (
+                    "The private catalog does not include customer reviews, and I couldn't "
+                    "verify a relevant review from live sources."
+                )
+            else:
+                spoken = (
+                    "I couldn't verify a product that meets all your requirements in the "
+                    "catalog or live results. Try relaxing one constraint or searching online."
+                )
+            return {
+                "answer": {
+                    "spoken_answer": spoken,
+                    "answer_detail": spoken,
+                    "top_pick_doc_id": "",
+                    "citation_doc_ids": [],
+                },
+                "steps": [step(
+                    "answerer",
+                    {"mode": mode, "note": "deterministic — zero grounded rows"},
+                    {"spoken_answer": spoken},
+                    label="Generating response",
+                    detail="No grounded products — LLM answer generation skipped",
+                )],
+            }
         products = [_slim(p) for p in picks]
         reconciliation = state.get("reconciliation")
         web_block = None
@@ -997,7 +1565,7 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                 "reconciliation": reconciliation,
                 "live_results": (state.get("web") or {}).get("results", [])[:5],
             }
-        criteria = (state.get("plan") or {}).get("comparison_criteria") or ["price", "rating"]
+        criteria = (state.get("plan") or {}).get("comparison_criteria") or ["price", "features"]
 
         prompt = full_prompt(
             "answerer",
@@ -1014,13 +1582,37 @@ def build_nodes(mcp: MCPToolClient) -> dict:
         answer = out.model_dump()
         critic_notes: list[str] = []
 
+        # The comparison order is the contract: the first reranked row is the
+        # top pick. If the draft selects another option, regenerate against the
+        # first row only so both the prose and id describe the same product.
+        expected_top = products[0]["doc_id"] if products else ""
+        if expected_top and answer.get("top_pick_doc_id") != expected_top:
+            retry_prompt = full_prompt(
+                "answerer",
+                transcript=transcript,
+                criteria_json=json.dumps(criteria),
+                mode=mode,
+                products_json=json.dumps(products[:1], indent=1),
+                web_json=json.dumps(web_block, indent=1) if web_block else "null",
+            )
+            retry: AnswerOutput = await call_structured(
+                retry_prompt, AnswerOutput, node="answerer",
+                context={"top_picks": products[:1], "reconciliation": reconciliation},
+            )
+            answer = retry.model_dump()
+            answer["top_pick_doc_id"] = expected_top
+            critic_notes.append("regenerated answer to match reranker rank 1")
+
         # Grounding checks (the "critic checks grounding" duty, in code).
         known = {p["doc_id"] for p in products if p.get("doc_id")}
         cited = [d for d in answer.get("citation_doc_ids", []) if d in known]
         dropped = [d for d in answer.get("citation_doc_ids", []) if d not in known]
         if dropped:
             critic_notes.append(f"dropped uncited/unknown doc_ids: {dropped}")
-        answer["citation_doc_ids"] = cited or sorted(known)
+        if not cited and known:
+            cited = sorted(known)
+            critic_notes.append("filled empty citations with retrieved row ids")
+        answer["citation_doc_ids"] = cited
         if answer.get("top_pick_doc_id") not in known:
             fallback = products[0]["doc_id"] if products else ""
             if answer.get("top_pick_doc_id"):
@@ -1039,6 +1631,21 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                 if text and not _voiced.search(text):
                     answer[field] = text.rstrip() + note
                     critic_notes.append(f"appended discrepancy notice to {field}")
+        if products and live_price_missing(
+            bool((state.get("router") or {}).get("needs_live")),
+            reconciliation,
+            answer.get("top_pick_doc_id") or "",
+        ):
+            price = _money(products[0].get("price"))
+            answer["spoken_answer"] = (
+                f"The catalog lists this item at {price}, but the live source did not show "
+                "a current price. Details are on screen."
+            )
+            answer["answer_detail"] = (
+                f"The catalog price for {products[0].get('title')} is {price}. "
+                "A matching live source was found, but it did not expose a current price."
+            )
+            critic_notes.append("distinguished catalog price from unavailable live price")
 
         return {
             "answer": answer,
@@ -1069,7 +1676,7 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                 },
                 label="Checking grounding",
                 detail=(" · ".join(critic_notes) if critic_notes
-                        else "All claims verified against retrieved evidence"),
+                        else "Citation IDs and top pick verified"),
             )],
         }
 

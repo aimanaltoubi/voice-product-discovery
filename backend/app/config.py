@@ -15,8 +15,8 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = BACKEND_DIR.parent
 PROMPTS_DIR = REPO_ROOT / "prompts"
 DATA_DIR = REPO_ROOT / "data"
-PROCESSED_DIR = DATA_DIR / "processed"
-STORAGE_DIR = BACKEND_DIR / "storage"
+PROCESSED_DIR = Path(os.environ.get("PROCESSED_DIR", DATA_DIR / "processed"))
+STORAGE_DIR = Path(os.environ.get("STORAGE_DIR", BACKEND_DIR / "storage"))
 CHROMA_DIR = STORAGE_DIR / "chroma"
 MEDIA_DIR = BACKEND_DIR / "media"
 LOGS_DIR = BACKEND_DIR / "logs"
@@ -105,6 +105,8 @@ class Settings:
 
     # ---- Retrieval ----
     RAG_TOP_K: int = _get_int("RAG_TOP_K", 8)
+    RAG_CANDIDATE_K: int = _get_int("RAG_CANDIDATE_K", 30)
+    CATEGORY_BROADNESS_DIVISOR: int = _get_int("CATEGORY_BROADNESS_DIVISOR", 3)
     CHROMA_COLLECTION: str = _get("CHROMA_COLLECTION", "products")
 
     # Minimum similarity score (1/(1+distance), so 0-1) for a catalog row to

@@ -59,8 +59,15 @@ async def call_structured(
     """
     if settings.LLM_PROVIDER == "mock":
         return _mock_structured(schema, context or {})
-    model = get_chat_model().with_structured_output(schema)
-    return await model.ainvoke(prompt)
+    kwargs = {"method": "function_calling"} if settings.LLM_PROVIDER == "openai" else {}
+    model = get_chat_model().with_structured_output(schema, **kwargs)
+    result = await model.ainvoke(prompt)
+    if result is None:
+        raise RuntimeError(
+            f"{node} returned no structured output from "
+            f"{settings.LLM_PROVIDER}:{settings.LLM_MODEL}"
+        )
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -150,7 +157,7 @@ def _mock_structured(schema: Type[T], ctx: dict[str, Any]) -> T:
                 "material": c.get("material"),
                 "eco_friendly": c.get("eco_friendly"),
             },
-            comparison_criteria=["price", "rating", "ingredients", "eco-friendliness"],
+            comparison_criteria=["price", "features", "ingredients", "eco-friendliness"],
         )
     if name == "RerankOutput":
         cands = ctx.get("candidates") or []
@@ -169,7 +176,9 @@ def _mock_structured(schema: Type[T], ctx: dict[str, Any]) -> T:
             rationale = ("[mock] No ratings in this catalog — ranked by semantic "
                          "relevance (retrieval score) within the applied filters.")
         return schema(
-            ranked_doc_ids=[p["doc_id"] for p in ranked[:3]],
+            ranked_doc_ids=[p["doc_id"] for p in ranked[:max(
+                1, min(int(ctx.get("top_k") or 3), 5)
+            )]],
             rationale=rationale,
         )
     if name == "AnswerOutput":
@@ -182,18 +191,13 @@ def _mock_structured(schema: Type[T], ctx: dict[str, Any]) -> T:
             )
         top = picks[0]
         price = f"${top['price']:.2f}" if isinstance(top.get("price"), (int, float)) else "an unlisted price"
-        rating = f"{top['rating']:.1f} stars" if isinstance(top.get("rating"), (int, float)) else "no rating yet"
         return schema(
             spoken_answer=(
                 f"My top pick is {top.get('title')} by {top.get('brand') or 'an unbranded maker'} — "
-                f"{rating}, typically {price}. "
-                + (
-                    "It was the only option matching your criteria; "
-                    if len(picks) == 1
-                    else f"I compared {len(picks)} options against your criteria; "
-                )
-                + "details and sources are on your screen. Would you like the most affordable or the highest rated?"
+                f"typically {price}. I compared {len(picks)} grounded option"
+                f"{'s' if len(picks) != 1 else ''}."
             ),
+            answer_detail=f"{top.get('title')} is the top grounded option at {price}.",
             top_pick_doc_id=top["doc_id"],
             citation_doc_ids=[p["doc_id"] for p in picks],
         )

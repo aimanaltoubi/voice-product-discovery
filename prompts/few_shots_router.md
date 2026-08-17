@@ -1,4 +1,5 @@
-Examples:
+Examples — FORMAT ONLY. Never copy their values into your output; extract every
+field from the user request at the end of this prompt.
 
 Request: "Recommend an eco-friendly stainless-steel cleaner under fifteen dollars."
 Output: {"task": "product_recommendation", "constraints": {"budget": 15, "material": "stainless steel", "brand": null, "category": "cleaner", "eco_friendly": true}, "safety_flags": [], "needs_live": false}

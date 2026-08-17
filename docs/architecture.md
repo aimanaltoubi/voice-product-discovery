@@ -4,16 +4,19 @@
 
 ```
 ┌────────────────────────────  Browser (React + Vite)  ───────────────────────────┐
-│  MicRecorder → transcript → AgentStepLog · ComparisonTable · CitationList · 🔊  │
+│  MicRecorder → transcript → AgentTrace · ComparisonTable · CitationList · 🔊    │
 └───────────────┬─────────────────────────────────────────────────────────────────┘
                 │  /api/transcribe  /api/discover  /api/speak   (Vite proxy → :8000)
 ┌───────────────▼─────────────────────────────  FastAPI (backend/app/main.py) ────┐
 │  speech/asr.py (faster-whisper | OpenAI)      speech/tts.py (edge-tts | OpenAI) │
 │                                                                                 │
 │  graph/build.py — LangGraph StateGraph                                          │
-│   router → [safety] → planner → retrieve ──┬─→ web_compare → reconcile ─┐       │
-│                                            ├─→ web_fallback ────────────┤       │
-│                                            └────────────────────────────┴→ answerer
+│   router ─┬─→ safety ────────────────────────────────────────────────→ END       │
+│           ├─→ clarify ───────────────────────────────────────────────→ END       │
+│           └─→ planner → retrieve ─┬─→ no_match ──────────────────┐               │
+│                                   ├─→ web_compare → reconcile ──┤               │
+│                                   ├─→ web_fallback ─────────────┤               │
+│                                   └─────────────────────────────┴→ answerer      │
 │        │                       │                     │                          │
 │        └── MCP client (stdio, mcp_server/client.py) ─┘                          │
 └───────────────┬─────────────────────────────────────────────────────────────────┘
@@ -34,33 +37,42 @@
    timestamped **segments** (fragments) + joined transcript.
 2. `POST /api/discover` runs the LangGraph pipeline (below); every node
    appends `{name, input, output, timestamp}` to `steps`, which the UI
-   renders verbatim as the agent step log.
-3. `POST /api/speak` synthesizes the ~40-word `spoken_answer` to an mp3
+   renders as the expandable Agent Trace.
+3. `POST /api/speak` synthesizes the 20–30-word `spoken_answer` to an mp3
    under `/media/`, which the browser auto-plays.
 
 ## Graph nodes (backend/graph/nodes.py)
 
 | Node | Type | Prompt file | What it does |
 |---|---|---|---|
-| `router` | LLM (structured) | `prompts/router.md` + few-shots | task, constraints (budget/material/brand/category/eco), `safety_flags`, `needs_live` |
-| `safety` | deterministic | — | hard block + safe spoken refusal when `safety_flags` non-empty |
+| `router` | LLM + code | `prompts/router.md` + few-shots | extracts task/constraints; code grounds budget, material, live intent and the union of LLM + deterministic safety flags in the utterance |
+| `safety` | deterministic | — | hard block with flag-specific refusal for verified mixing, ingestion or harmful intent |
+| `clarify` | deterministic | — | asks one question when a product type is present but there is not enough information to rank responsibly |
 | `planner` | LLM + code | `prompts/planner.md` | picks MCP `sources`, retrieval filters, comparison criteria; **code re-enforces the rubric** (rag.search always; web.search iff `needs_live`) and back-fills filters from router constraints |
-| `retrieve` (`rag.search` step) | MCP tool + LLM | `prompts/reranker.md` | calls `rag.search` over MCP → hybrid candidates; LLM reranks; code validates ranked ids ⊆ candidates and tops up to 3 by score |
-| `web_compare` (`web.search` step) | MCP tool | — | live results for the top pick when the user asked for current price/availability |
+| `retrieve` (`rag.search` step) | MCP tool + LLM | `prompts/reranker.md` | expands categories to their catalog family, applies the relevance floor inside a logged relaxation ladder, then reranks up to 5 results; code validates ids and logs score-based top-ups |
+| `no_match` | deterministic | — | reports that a hard budget cannot be met and surfaces the closest grounded alternatives without an unnecessary web call |
+| `web_compare` (`web.search` step) | MCP tool | — | live results for the top-ranked pick only when the user asked for current price/availability |
 | `web_fallback` (`web.search` step) | MCP tool | — | when the private catalog has zero matches, answer from live web rows (`web-1..n`) instead |
-| `reconcile` | deterministic | — | matches catalog picks ↔ web titles by normalized title+brand similarity (≥ 0.45, SKU-less web rows); flags price deltas > 15% and availability notes |
-| `answerer` | LLM + code | `prompts/answerer.md` | ~40-word grounded spoken answer ending with the affordable-vs-highest-rated follow-up; **critic in code**: citations ∩ known rows, top-pick id validated, discrepancy notice force-appended if the LLM omitted it |
+| `reconcile` | deterministic | — | matches the top catalog pick to web titles using ≥2 distinctive shared tokens, or 1 distinctive token with ≥0.6 containment; flags price deltas >15% |
+| `answerer` | LLM + code | `prompts/answerer.md` | 20–30-word grounded spoken answer with no forced follow-up; **critic in code** validates citations/top-pick ids and appends omitted discrepancy notices |
 
 ## Where "agentic" decisions happen
 
 - Tool choice is decided per-request by the planner (LLM) and *verified* by
   deterministic rubric code — the step log shows both the LLM plan and any
   `enforced_rules`.
-- Conditional edges: safety short-circuit, zero-candidate web fallback,
-  needs_live compare branch.
+- Conditional edges: safety and clarification short-circuits, hard-budget
+  no-match response, zero-candidate web fallback, and needs-live comparison.
 - The LLM proposes; code verifies (rerank subset check, answer grounding
   check, discrepancy mention check). Failures are visible in the step log
   (`critic_notes`, `dropped_unknown_doc_ids`).
+- The catalog has no ratings or reviews, so those requests are logged as
+  unsupported privately and routed to live search; generated search links are
+  labeled as reference-only and logged separately from evidence.
+- Deterministic guards intentionally use small vocabulary lists for material,
+  safety, audience, freshness and reconciliation checks. Outside those lists,
+  safety unions the Router's LLM flags with exact code matches; retrieval
+  degrades by omitting an unsupported filter rather than inventing evidence.
 
 ## MCP specifics
 

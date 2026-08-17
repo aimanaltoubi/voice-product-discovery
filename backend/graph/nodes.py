@@ -936,6 +936,18 @@ def _requires_all_anchors(router: dict) -> bool:
     )
 
 
+def _identity_anchor_query(constraints: dict, spoken: str) -> str:
+    """Hard lexical identity excludes soft ranking preferences by design."""
+    return (
+        " ".join(
+            str(value)
+            for value in (constraints.get("brand"), constraints.get("product_type"))
+            if value
+        )
+        or spoken
+    )
+
+
 def _matches_all_query_terms(row: dict, terms: set[str]) -> bool:
     title = str(row.get("title") or "")
     return bool(terms) and all(
@@ -1479,11 +1491,11 @@ def build_nodes(mcp: MCPToolClient) -> dict:
             candidates = []
             rating_catalog_unsupported = rating_request
         spoken = state["transcript"]
-        anchor_query = (
-            spoken if product_type and _norm(product_type) in _norm(spoken)
-            else " ".join(str(v) for v in (router_c.get("brand"), product_type) if v)
-            or spoken
-        )
+        # Identity anchors come only from structured identity fields. Using the
+        # full utterance here turns soft preferences such as "soft" and
+        # "lightweight" into mandatory title tokens, rejecting otherwise valid
+        # products before the semantic reranker can prioritize those qualities.
+        anchor_query = _identity_anchor_query(router_c, spoken)
         exact_terms = set(_query_terms(anchor_query))
         category_retry = None
         if (state.get("router") or {}).get("needs_live") and len(exact_terms) >= 2:

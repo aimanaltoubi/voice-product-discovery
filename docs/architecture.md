@@ -54,7 +54,7 @@
 | `web_compare` (`web.search` step) | MCP tool | — | live results for the top-ranked pick only when the user asked for current price/availability |
 | `web_fallback` (`web.search` step) | MCP tool | — | when the private catalog has zero matches, answer from live web rows (`web-1..n`) instead |
 | `reconcile` | deterministic | — | matches the top catalog pick to web titles using ≥2 distinctive shared tokens, or 1 distinctive token with ≥0.6 containment; flags price deltas >15% |
-| `answerer` | LLM + code | `prompts/answerer.md` | 20–30-word grounded spoken answer with no forced follow-up; **critic in code** validates citations/top-pick ids and appends omitted discrepancy notices |
+| `answerer` | LLM + code | `prompts/answerer.md` | 20–30-word grounded spoken answer with no forced follow-up; **critic in code** validates citations, top-pick ids, and stated prices, then appends omitted discrepancy notices |
 
 ## Where "agentic" decisions happen
 

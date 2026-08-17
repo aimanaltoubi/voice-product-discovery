@@ -12,10 +12,11 @@ From the user's spoken request, extract:
   - material: material if stated (e.g. "stainless steel"). Null otherwise.
   - brand: brand if the user explicitly asked for one. Null otherwise.
   - category: product category if evident. Null otherwise.
-  - eco_friendly: true only if eco/green/natural was explicitly implied, else null.
+  - color: the desired colour as ONE lowercase word if the user names one ("pink", "green", "navy", "black"). Null otherwise. A bare colour word during a product search is ALWAYS a colour — "make it green" means color=green, never eco_friendly.
+  - eco_friendly: true ONLY for explicit environmental language — "eco-friendly", "sustainable", "environmentally friendly", "made from recycled materials". The word "green" on its own is a COLOUR, not an environmental claim; only treat it as eco_friendly when paired with sustainability wording ("a greener, more sustainable option"). Null otherwise.
 - safety_flags: list of flags if the request involves unsafe chemical advice (e.g. mixing bleach and ammonia), ingestion of cleaning products, or other harmful intent. Empty list if safe.
 - needs_live: true ONLY if the user explicitly asks for current/latest price, availability, "right now", "in stock", or similar live information.
-- top_k: how many products the user asked to compare, capped at 5 ("show me one" -> 1, "show me five" -> 5). Default to 3 when unspecified.
+- top_k: how many products the user asked to compare, capped at 8 ("show me one" -> 1, "show me eight" -> 8). Default to 6 when unspecified.
 
 <<few_shots>>
 

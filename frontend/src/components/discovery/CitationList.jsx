@@ -11,22 +11,33 @@ export default function CitationList({ citations }) {
             <>
               <FileText className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" />
               <span className="min-w-0">
-                <span className="font-mono text-[12px] text-slate-500">{c.doc_id}</span>
+                <span className="text-[12px] font-medium text-slate-500">Amazon 2020 dataset</span>
                 <span className="mx-1.5 text-slate-300">·</span>
-                <span className="text-slate-700">{c.title}</span>
+                <span className="font-mono text-[11px] text-slate-400">{c.doc_id}</span>
+                <span className="block text-slate-700">{c.title}</span>
                 {c.brand && c.brand.toLowerCase() !== 'unknown' && (
                   <span className="text-slate-500"> — {c.brand}</span>
+                )}
+                {c.product_url && (
+                  <a
+                    href={c.product_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mt-0.5 block w-fit rounded text-[12px] font-medium text-blue-700 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                  >
+                    View on Amazon →
+                  </a>
                 )}
               </span>
             </>
           ) : (
             <>
-              <ExternalLink className="mt-0.5 h-3.5 w-3.5 shrink-0 text-teal-600" />
+              <ExternalLink className="mt-0.5 h-3.5 w-3.5 shrink-0 text-blue-600" />
               <a
                 href={c.url}
                 target="_blank"
-                rel="noreferrer"
-                className="min-w-0 break-all text-teal-700 hover:underline"
+                rel="noopener noreferrer"
+                className="min-w-0 break-all text-blue-700 hover:underline"
               >
                 {c.title || c.url}
               </a>

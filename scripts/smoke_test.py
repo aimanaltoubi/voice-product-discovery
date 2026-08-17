@@ -75,9 +75,17 @@ async def main() -> int:
             else:
                 assert payload["blocked"] is False
                 assert "router" in steps and "planner" in steps and "rag.search" in steps
-                assert payload["comparison_table"], "empty comparison table"
-                assert payload["citations"], "no citations"
-                assert payload["top_pick"] and payload["top_pick"]["doc_id"]
+                if payload["comparison_table"]:
+                    assert payload["citations"], "grounded products need citations"
+                    assert payload["top_pick"] and payload["top_pick"]["doc_id"]
+                else:
+                    # Live search is allowed to return zero rows offline. The
+                    # graph must surface that state honestly, not manufacture
+                    # a product/card/citation to satisfy the smoke test.
+                    assert label == "needs_live", "private scenario lost all products"
+                    assert payload["live_unverified"], "missing live no-match state"
+                    assert not payload["citations"], "empty result must not cite a product"
+                    assert payload["top_pick"] is None, "empty result must not name a top pick"
             if label == "needs_live":
                 assert "web.search" in steps, "planner should have added web.search"
         except AssertionError as e:

@@ -80,7 +80,7 @@ function unverifiedFeatures(row, requested = []) {
   return missing.slice(0, gap);
 }
 
-function ProductCard({ row, rank, isTop, isAlt, requested }) {
+function ProductCard({ row, rank, isTop, isAlt, requested, liveMatch }) {
   const [open, setOpen] = useState(false);
   const reasons = row.match_reasons || [];
   const unverified = unverifiedFeatures(row, requested);
@@ -124,6 +124,29 @@ function ProductCard({ row, rank, isTop, isAlt, requested }) {
               </span>
             )}
           </div>
+
+          {liveMatch && (
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-[12.5px] text-teal-700">
+              <span className="font-medium">Live checked</span>
+              <span>·</span>
+              <span>
+                {typeof liveMatch.web_price === 'number'
+                  ? `Current price ${fmtPrice(liveMatch.web_price)}`
+                  : 'Current price not shown by source'}
+              </span>
+              {liveMatch.web_url && (
+                <a
+                  href={liveMatch.web_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 rounded hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+                >
+                  <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                  Open live source
+                </a>
+              )}
+            </div>
+          )}
 
           {(reasons.length > 0 || unverified.length > 0) && (
             <div className="mt-3 flex flex-wrap items-center gap-1.5">
@@ -203,7 +226,9 @@ function ProductCard({ row, rank, isTop, isAlt, requested }) {
   );
 }
 
-export default function ProductResults({ rows, variant = 'recommended', requested = [] }) {
+export default function ProductResults({
+  rows, variant = 'recommended', requested = [], reconciliation,
+}) {
   if (!rows?.length) return null;
   const isAlt = variant === 'alternatives';
   return (
@@ -227,6 +252,7 @@ export default function ProductResults({ rows, variant = 'recommended', requeste
             isTop={i === 0}
             isAlt={isAlt}
             requested={isAlt ? [] : requested}
+            liveMatch={reconciliation?.matches?.[r.doc_id]}
           />
         ))}
       </ol>

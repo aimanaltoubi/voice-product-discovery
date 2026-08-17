@@ -15,10 +15,11 @@ payload shape the React frontend consumes verbatim.
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote_plus
 
 from langgraph.graph import END, StateGraph
 
-from graph.nodes import build_nodes
+from graph.nodes import _RATING_REQUEST_RE, _is_search_results_page, build_nodes, step
 from graph.state import DiscoveryState
 from mcp_server.client import MCPToolClient
 
@@ -152,9 +153,37 @@ async def run_discovery(
             (r for r in comparison_table if r["doc_id"] == top_pick.get("doc_id")), None
         )
 
+    # Search pages are useful escape hatches, but are not products or evidence.
+    search_links = [
+        {"title": r.get("title"), "url": r.get("url")}
+        for r in ((final.get("web") or {}).get("results") or [])
+        if _RATING_REQUEST_RE.search(transcript) and _is_search_results_page(r)
+        and r.get("url")
+    ]
+    generated_search_links = False
+    if _RATING_REQUEST_RE.search(transcript) and not search_links:
+        product = ((final.get("router") or {}).get("constraints") or {}).get("product_type")
+        queries = [f"highest rated {product or 'products'}"]
+        search_links = [
+            {"title": f"Amazon: {query.title()}",
+             "url": f"https://www.amazon.com/s?k={quote_plus(query)}"}
+            for query in queries
+        ]
+        generated_search_links = True
+
+    steps = list(final.get("steps", []))
+    if generated_search_links:
+        steps.append(step(
+            "search_links",
+            {"reason": "live search returned no usable search page"},
+            {"links": search_links},
+            label="Preparing reference links",
+            detail="Generated Amazon search link — reference only, not evidence",
+        ))
+
     return {
         "transcript": transcript,
-        "steps": final.get("steps", []),
+        "steps": steps,
         # spoken_answer is what TTS reads (short); answer_detail is the fuller
         # on-screen text. The UI shows detail and speaks spoken_answer.
         "spoken_answer": answer.get("spoken_answer", ""),
@@ -162,6 +191,7 @@ async def run_discovery(
         "top_pick": top_pick,
         "comparison_table": comparison_table,
         "citations": citations,
+        "search_links": search_links,
         "blocked": bool(final.get("blocked")),
         "source": final.get("mode", "private"),
         # Set when the request was too broad; UI shows the single question.

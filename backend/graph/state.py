@@ -112,7 +112,7 @@ class RouterOutput(BaseModel):
         description="True if the user asked for current/latest price, stock or availability.")
     top_k: int = Field(
         default=3,
-        description="How many products the user asked to compare. Default 3.")
+        description="How many products to compare, capped at 5. Default 3.")
 
 
 class RetrievalFilters(BaseModel):
@@ -135,7 +135,7 @@ class PlanOutput(BaseModel):
 class RerankOutput(BaseModel):
     """LLM reranking of hybrid-retrieval candidates (prompts/reranker.md)."""
     ranked_doc_ids: List[str] = Field(
-        description="doc_ids of the top candidates, best first, max 3. "
+        description="Top candidate doc_ids, best first, max 5. "
                     "Must be a subset of the provided candidate doc_ids.")
     rationale: str = ""
 

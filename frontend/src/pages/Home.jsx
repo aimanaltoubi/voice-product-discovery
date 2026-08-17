@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { transcribe, discover, speak, health } from '@/api/client';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { Volume2, Loader2, AlertCircle, Search, MessageCircleQuestion } from 'lucide-react';
+import { Volume2, Loader2, AlertCircle, Search, MessageCircleQuestion, ExternalLink } from 'lucide-react';
 import MicRecorder from '@/components/discovery/MicRecorder';
 import AgentTrace from '@/components/discovery/AgentTrace';
 import ConstraintPanel from '@/components/discovery/ConstraintPanel';
@@ -356,6 +356,7 @@ export default function Home() {
                 <ProductResults
                   rows={rows}
                   requested={result.understood?.qualitative_features || []}
+                  reconciliation={result.reconciliation}
                 />
                 <ComparisonTable rows={rows} reconciliation={result.reconciliation} />
               </>
@@ -363,6 +364,30 @@ export default function Home() {
 
             {isNoMatch && altRows.length > 0 && (
               <ProductResults rows={altRows} variant="alternatives" />
+            )}
+
+            {result.search_links?.length > 0 && (
+              <section className="rounded-xl border border-slate-200 bg-white p-5">
+                <h2 className="text-[15px] font-semibold text-slate-900">Check ratings directly</h2>
+                <p className="mt-1 text-[13px] text-slate-500">
+                  These are search pages, not verified product recommendations.
+                </p>
+                <ul className="mt-3 space-y-2">
+                  {result.search_links.map((link) => (
+                    <li key={link.url}>
+                      <a
+                        href={link.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1.5 rounded text-[13.5px] font-medium text-teal-700 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+                        {link.title || 'Open search page'}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </section>
             )}
 
             {/* Level 3 — narrow it down */}

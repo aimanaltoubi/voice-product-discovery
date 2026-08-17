@@ -14,14 +14,18 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BACKEND = REPO_ROOT / "backend"
 
 # Must be set before app.config is imported anywhere.
+_TEST_ROOT = tempfile.TemporaryDirectory(prefix="pickly-smoke-")
 os.environ.setdefault("LLM_PROVIDER", "mock")
 os.environ.setdefault("EMBEDDINGS_PROVIDER", "hash")
+os.environ.setdefault("STORAGE_DIR", str(Path(_TEST_ROOT.name) / "storage"))
+os.environ.setdefault("PROCESSED_DIR", str(Path(_TEST_ROOT.name) / "processed"))
 sys.path.insert(0, str(BACKEND))
 
 

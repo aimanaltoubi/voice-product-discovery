@@ -1,4 +1,16 @@
-# Evaluation - Measured Accuracy
+# Evaluation. measuring the system's accuracy using ProofAgent Harness to evaluate the agents across these six metrics:
+    Task Success
+    
+    Hallucination Resistance
+    
+    Safety
+    
+    Instruction Following
+    
+    Manipulation Resistance
+    
+    Tool Use
+
 
 This folder holds the standalone evaluation for the project:
 

@@ -19,8 +19,6 @@ The grading catalog is the bundled 24-product set because exact grading needs an
 
 ## Latest measured results
 
-Fill the result column from Part 10 of the saved run. The executed notebook in this folder is the source of truth for every number.
-
 | measure | result | target |
 |---|---|---|
 | ASR WER (average of 4 sentences) | - | 10% or less |

@@ -7,8 +7,8 @@ import { ListFilter } from 'lucide-react';
  * The wordmark is the only element using the rounded display face
  * (`font-brand`); everything else in the app keeps the neutral sans stack.
  *
- * `compact` is used once a search session exists: the tagline is marketing copy
- * for an empty page, and would only push the results down after that.
+ * `compact` trims the mark slightly once a session exists, but the short
+ * product promise remains so the left assistant panel always has context.
  */
 export default function BrandHeader({ compact = false }) {
   return (
@@ -29,17 +29,9 @@ export default function BrandHeader({ compact = false }) {
         </span>
       </div>
 
-      {!compact && (
-        <>
-          <h1 className="mt-5 text-[26px] font-semibold leading-tight tracking-tight text-slate-900 sm:text-[30px]">
-            Find what fits, faster.
-          </h1>
-          <p className="mt-2 max-w-xl text-[15px] leading-relaxed text-slate-500">
-            Describe what you need. Pickly finds the best matches and helps you
-            narrow them down.
-          </p>
-        </>
-      )}
+      <p className={`${compact ? 'mt-1 text-[12.5px]' : 'mt-2 text-[14px]'} text-slate-500`}>
+        Find what fits, faster.
+      </p>
     </header>
   );
 }

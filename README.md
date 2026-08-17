@@ -121,7 +121,7 @@ flowchart TD
   MCPC --> MCPS["MCP server<br/>product-discovery-tools"]
   MCPS --> RAG["rag.search"]
   MCPS --> WEB["web.search<br/>cache 180s · rate limit"]
-  RAG --> CH[("Chroma<br/>2,615 AMZ2020-* docs<br/>MiniLM-L6-v2")]
+  RAG --> CH[("Chroma index<br/>2,615 searchable docs<br/>curated subset · MiniLM-L6-v2")]
   WEB --> DDG["Live web (DuckDuckGo)"]
   CH --> RR["rerank + evidence chips"]
   DDG --> REC["reconcile<br/>distinctive-token match"]
@@ -130,6 +130,21 @@ flowchart TD
   ANS --> UI["Cards · comparison · citations"]
   ANS --> TTS["/api/speak → edge-tts mp3"]
 ```
+
+## Source dataset vs. Pickly's index
+
+These are two different numbers and the UI keeps them distinct:
+
+| | |
+|---|---|
+| **Source dataset** | Amazon Product Dataset 2020 (Kaggle, `promptcloud/amazon-product-dataset-2020`) — the full CSV shipped by the publisher |
+| **Pickly's private index** | **2,615 searchable products** — a curated, category-balanced subset built by `rag.ingest` and stored in Chroma |
+
+The index is deliberately a subset: `--max-per-category 500 --require-price
+--skip-uncategorized` caps any one category so the slice stays varied and fast to
+build. **"2,615" is the size of the searchable index, not the size of the source
+dataset.** The count is read live from `/api/health`, so re-ingesting a different
+slice updates the UI automatically — nothing is hardcoded.
 
 ## Limitations (known and handled, not hidden)
 

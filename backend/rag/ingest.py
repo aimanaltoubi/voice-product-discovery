@@ -48,6 +48,11 @@ COLUMN_CANDIDATES: dict[str, list[str]] = {
     # useful as embedding signal, wrong as a displayed ingredient list.
     "ingredients": ["ingredients", "Ingredients"],
     "specs": ["Product Specification", "product_specification", "Technical Details"],
+    "technical_details": ["Technical Details", "technical_details"],
+    "model_number": ["Model Number", "model_number"],
+    "shipping_weight": ["Shipping Weight", "shipping_weight"],
+    "product_dimensions": ["Product Dimensions", "product_dimensions"],
+    "product_url": ["Product Url", "Product URL", "product_url", "url"],
     "reviews": ["review_snippets", "reviews", "Customer Reviews", "customer_reviews"],
     # Product-level image. The 2020 dump ships a pipe-separated list of Amazon
     # CDN URLs on the same row as the product, so the first URL is provenanced
@@ -163,6 +168,14 @@ def _first_image(value: str | None) -> str | None:
     return first
 
 
+def _product_url(value: str | None) -> str | None:
+    """Keep only the source row's explicit http(s) product URL."""
+    if not value:
+        return None
+    url = str(value).split("|")[0].strip()
+    return url if re.match(r"^https?://\S+$", url, re.I) else None
+
+
 def _pick(df: pd.DataFrame, field: str) -> str | None:
     """Resolve a target field to a real column.
 
@@ -248,6 +261,7 @@ def load_and_normalize(
         features = (val(row, "features") or "")[:1200]
         ingredients = (val(row, "ingredients") or "")[:800]
         specs = (val(row, "specs") or "")[:600]
+        technical_details = (val(row, "technical_details") or "")[:800]
         snippets = (val(row, "reviews") or "")[:800]
         blob = f"{title} {features} {ingredients}".lower()
         size_oz = parse_size_oz(f"{title} {features}")
@@ -256,6 +270,11 @@ def load_and_normalize(
             "brand": val(row, "brand") or "Unknown", "category": category,
             "price": price, "rating": rating, "features": features,
             "ingredients": ingredients, "specs": specs,
+            "technical_details": technical_details,
+            "model_number": val(row, "model_number") or "",
+            "shipping_weight": val(row, "shipping_weight") or "",
+            "product_dimensions": val(row, "product_dimensions") or "",
+            "product_url": _product_url(val(row, "product_url")),
             # First URL only; must be a plain http(s) image from this row.
             "image": _first_image(val(row, "image")),
             "eco_friendly": is_eco_friendly(blob),
@@ -292,6 +311,7 @@ def build_index(products: pd.DataFrame, provenance: dict | None = None) -> None:
         docs.append(
             f"{p['title']} | {p['brand']} | {p['category']} | "
             f"{p['features']} | {p['ingredients']} | {p.get('specs', '')} | "
+            f"{p.get('technical_details', '')} | "
             f"{p['review_snippets']}".lower()[:4000]
         )
         meta = {
@@ -301,6 +321,15 @@ def build_index(products: pd.DataFrame, provenance: dict | None = None) -> None:
             "ingredients": (p["ingredients"] or "")[:300],
             **({"image": p["image"]} if p.get("image") else {}),
         }
+        optional_text = {
+            "specification": (p.get("specs") or "")[:600],
+            "technical_details": (p.get("technical_details") or "")[:800],
+            "model_number": p.get("model_number") or "",
+            "shipping_weight": p.get("shipping_weight") or "",
+            "product_dimensions": p.get("product_dimensions") or "",
+            "product_url": p.get("product_url") or "",
+        }
+        meta.update({k: v for k, v in optional_text.items() if v})
         for numf in ("price", "rating", "size_oz", "price_per_oz"):
             v = p[numf]
             if v is not None and not pd.isna(v):

@@ -16,6 +16,17 @@ export default function NoMatchState({ noMatch, onRaiseBudget, onSearchOnline })
   const requested = money(noMatch.requested_max_price);
   const closest = money(noMatch.closest_available_price);
 
+  // Budget is only the blocker when the backend says so AND the suggestion is
+  // genuinely higher than the current budget. The invariant is enforced here as
+  // well as server-side, so a nonsensical "raise your budget to $7.86" against a
+  // $37 budget can never render even if the payload is wrong.
+  const budgetBlocked =
+    noMatch.failed_constraints?.includes('max_price') &&
+    typeof noMatch.closest_available_price === 'number' &&
+    typeof noMatch.requested_max_price === 'number' &&
+    noMatch.closest_available_price > noMatch.requested_max_price;
+  const sizeBlocked = noMatch.failed_constraints?.includes('size');
+
   return (
     <section className="rounded-xl border border-amber-200 bg-amber-50/60 p-5">
       <div className="flex items-start gap-3">
@@ -25,27 +36,32 @@ export default function NoMatchState({ noMatch, onRaiseBudget, onSearchOnline })
             No exact matches
           </h2>
           <p className="mt-1 text-[14px] text-slate-700">
-            Nothing in the catalog met all of your current requirements. Here's what
-            would need to change.
+            {budgetBlocked
+              ? 'We carry this, but not within your current budget.'
+              : sizeBlocked
+                ? `We found the right product type, but none of the retrieved products verify the ${noMatch.requested_size || 'requested'} size.`
+              : noMatch.failed_constraints?.includes('audience')
+                ? "Everything matching your other criteria is marketed to children, which doesn't fit who this is for."
+                : "We couldn't find a close match for this product type in Pickly's catalog."}
           </p>
 
-          <dl className="mt-3 grid gap-x-8 gap-y-2 sm:grid-cols-2 text-[13.5px]">
-            {requested && (
+          {budgetBlocked && (
+            <dl className="mt-3 grid gap-x-8 gap-y-2 sm:grid-cols-2 text-[13.5px]">
+              {requested && (
+                <div className="flex items-baseline gap-2">
+                  <dt className="text-slate-500">Your budget:</dt>
+                  <dd className="font-medium text-slate-900 tabular-nums">≤ {requested}</dd>
+                </div>
+              )}
               <div className="flex items-baseline gap-2">
-                <dt className="text-slate-500">Your budget:</dt>
-                <dd className="font-medium text-slate-900 tabular-nums">≤ {requested}</dd>
-              </div>
-            )}
-            {closest && (
-              <div className="flex items-baseline gap-2">
-                <dt className="text-slate-500">Closest options start around:</dt>
+                <dt className="text-slate-500">Closest matching options start at:</dt>
                 <dd className="font-medium text-slate-900 tabular-nums">{closest}</dd>
               </div>
-            )}
-          </dl>
+            </dl>
+          )}
 
           <div className="mt-4 flex flex-wrap gap-2">
-            {closest && onRaiseBudget && (
+            {budgetBlocked && onRaiseBudget && (
               <button
                 type="button"
                 onClick={() => onRaiseBudget(noMatch.closest_available_price)}

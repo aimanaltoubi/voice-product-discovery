@@ -109,6 +109,21 @@ async def run_discovery(
             "ingredients": p.get("ingredients"),
             "features": p.get("features"),
             "url": p.get("url"),
+            "source": p.get("source") or "private",
+            "product_url": p.get("product_url"),
+            "category": p.get("category"),
+            "specification": p.get("specification"),
+            "technical_details": p.get("technical_details"),
+            "model_number": p.get("model_number"),
+            "shipping_weight": p.get("shipping_weight"),
+            "product_dimensions": p.get("product_dimensions"),
+            "eco_friendly": p.get("eco_friendly"),
+            # Live-result fields: retailer name for "View at X", and an
+            # explicit price_verified flag so the card can say "Price not
+            # verified" instead of implying a price it never saw.
+            "retailer": p.get("retailer"),
+            "price_verified": p.get("price_verified"),
+            "availability": p.get("availability"),
             # Amazon CDN URL from this product's own dataset row (never inferred).
             "image": p.get("image"),
             # Evidence-backed "why this product" data (graph/nodes.py:match_evidence).
@@ -140,6 +155,7 @@ async def run_discovery(
                 "doc_id": doc_id,
                 "title": row.get("title"),
                 "brand": row.get("brand"),
+                "product_url": row.get("product_url"),
             })
     for match in ((final.get("reconciliation") or {}).get("matches") or {}).values():
         url = match.get("web_url")
@@ -212,4 +228,12 @@ async def run_discovery(
         "reconciliation": final.get("reconciliation"),
         # Present only when a hard constraint eliminated every candidate.
         "no_match": final.get("no_match"),
+        "live_unverified": final.get("live_unverified"),
+        "related_online": [
+            {**{k: p.get(k) for k in ("doc_id","title","price","price_verified",
+                                      "retailer","url","availability","image","source",
+                                      "match_reasons","matched_constraints",
+                                      "supported_constraints","unverified_hard")}}
+            for p in (final.get("related_online") or [])
+        ],
     }

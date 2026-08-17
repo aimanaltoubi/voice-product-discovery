@@ -33,7 +33,7 @@ class DiscoveryState(TypedDict, total=False):
     router: dict[str, Any]            # RouterOutput.model_dump()
     plan: dict[str, Any]              # PlanOutput.model_dump() + enforcement notes
     candidates: list[dict[str, Any]]  # raw rag.search rows
-    top_picks: list[dict[str, Any]]   # reranked rows (<=3), or web fallback rows
+    top_picks: list[dict[str, Any]]   # qualified reranked rows (<=8), or web fallback rows
     web: dict[str, Any]               # web.search payload (compare or fallback)
     reconciliation: dict[str, Any]    # discrepancy flags per doc_id
     answer: dict[str, Any]            # AnswerOutput.model_dump()
@@ -46,6 +46,9 @@ class DiscoveryState(TypedDict, total=False):
     # Presence of this key routes retrieve -> answer instead of the web
     # fallback, so an over-budget product is never dressed up as a match.
     no_match: dict[str, Any]
+    # Set when web.search returned pages but none qualified as a product.
+    live_unverified: dict[str, Any]
+    related_online: list[dict[str, Any]]
     # Every node appends its own entries; operator.add concatenates them
     # in execution order for the UI's agent step log.
     steps: Annotated[list[dict[str, Any]], operator.add]
@@ -84,6 +87,15 @@ class Constraints(BaseModel):
     qualitative_features: List[str] = Field(
         default_factory=list,
         description="Soft preferences as short phrases, e.g. ['soft', 'easy to wash'].")
+    # Set by the UI's "Edit priorities" control, not by the LLM: a subset of
+    # qualitative_features the user promoted to must-have. A product with no
+    # literal evidence for one of these is not an exact match.
+    required_features: List[str] = Field(default_factory=list)
+    color: Optional[str] = Field(
+        default=None,
+        description="Desired colour as a single lowercase word ('pink', 'green', "
+                    "'navy'). Colours are mutually exclusive, so a new colour "
+                    "REPLACES the previous one.")
     material: Optional[str] = Field(
         default=None, description="Surface/material, e.g. 'stainless steel'.")
     brand: Optional[str] = None
@@ -111,8 +123,8 @@ class RouterOutput(BaseModel):
         default=False,
         description="True if the user asked for current/latest price, stock or availability.")
     top_k: int = Field(
-        default=3,
-        description="How many products to compare, capped at 5. Default 3.")
+        default=6,
+        description="How many qualified products to return, capped at 8. Default 6.")
 
 
 class RetrievalFilters(BaseModel):
@@ -135,7 +147,7 @@ class PlanOutput(BaseModel):
 class RerankOutput(BaseModel):
     """LLM reranking of hybrid-retrieval candidates (prompts/reranker.md)."""
     ranked_doc_ids: List[str] = Field(
-        description="Top candidate doc_ids, best first, max 5. "
+        description="Top candidate doc_ids, best first, max 8. "
                     "Must be a subset of the provided candidate doc_ids.")
     rationale: str = ""
 

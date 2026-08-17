@@ -27,20 +27,21 @@ function Cell({ children, muted }) {
 export default function ComparisonTable({ rows, reconciliation }) {
   const [open, setOpen] = useState(false);
   if (!rows?.length || rows.length < 2) return null;
+  const compared = rows.slice(0, 3);
 
   // Union of every evidence chip across the compared products, in first-seen
   // order. A product gets a ✓ only if that exact chip is on its own record.
   const criteria = [];
   const seen = new Set();
-  rows.forEach((r) => (r.match_reasons || []).forEach((c) => {
+  compared.forEach((r) => (r.match_reasons || []).forEach((c) => {
     const k = c.toLowerCase();
     if (!seen.has(k)) { seen.add(k); criteria.push(c); }
   }));
 
-  const anyBrand = rows.some((r) => r.brand && r.brand.toLowerCase() !== 'unknown');
-  const anyRating = rows.some((r) => typeof r.rating === 'number');
+  const anyBrand = compared.some((r) => r.brand && r.brand.toLowerCase() !== 'unknown');
+  const anyRating = compared.some((r) => typeof r.rating === 'number');
   const matches = reconciliation?.matches || {};
-  const anyLive = rows.some((r) => matches[r.doc_id]);
+  const anyLive = compared.some((r) => matches[r.doc_id]);
 
   const shortName = (t, i) =>
     i === 0 ? 'Top pick' : `Option ${i + 1}`;
@@ -54,7 +55,7 @@ export default function ComparisonTable({ rows, reconciliation }) {
         className="flex w-full items-center justify-between gap-3 rounded-xl px-5 py-3.5 text-left transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
       >
         <span className="text-sm font-semibold text-slate-900">
-          Compare all {rows.length}
+          Compare {compared.length === 3 ? 'top 3' : `${compared.length} products`}
         </span>
         <ChevronRight
           className={`h-4 w-4 shrink-0 text-slate-400 transition-transform duration-200 ${open ? 'rotate-90' : ''}`}
@@ -73,7 +74,7 @@ export default function ComparisonTable({ rows, reconciliation }) {
                 <th scope="col" className="px-3 py-2 text-[12px] font-medium uppercase tracking-wide text-slate-500">
                   Criteria
                 </th>
-                {rows.map((r, i) => (
+                {compared.map((r, i) => (
                   <th
                     key={r.doc_id || i}
                     scope="col"
@@ -90,7 +91,7 @@ export default function ComparisonTable({ rows, reconciliation }) {
                 <th scope="row" className="border-t border-slate-200 px-3 py-2 text-[13px] font-medium text-slate-600">
                   Price
                 </th>
-                {rows.map((r, i) => (
+                {compared.map((r, i) => (
                   <Cell key={i}><span className="font-semibold tabular-nums">{fmt(r.price)}</span></Cell>
                 ))}
               </tr>
@@ -101,7 +102,7 @@ export default function ComparisonTable({ rows, reconciliation }) {
                     <th scope="row" className="border-t border-slate-200 px-3 py-2 text-[13px] font-medium text-slate-600">
                       Live price
                     </th>
-                    {rows.map((r, i) => {
+                    {compared.map((r, i) => {
                       const m = matches[r.doc_id];
                       return (
                         <Cell key={i} muted={!m || typeof m.web_price !== 'number'}>
@@ -116,7 +117,7 @@ export default function ComparisonTable({ rows, reconciliation }) {
                     <th scope="row" className="border-t border-slate-200 px-3 py-2 text-[13px] font-medium text-slate-600">
                       Live availability
                     </th>
-                    {rows.map((r, i) => {
+                    {compared.map((r, i) => {
                       const m = matches[r.doc_id];
                       return (
                         <Cell key={i} muted={!m?.availability}>
@@ -133,7 +134,7 @@ export default function ComparisonTable({ rows, reconciliation }) {
                   <th scope="row" className="border-t border-slate-200 px-3 py-2 text-[13px] font-medium text-slate-600">
                     {c}
                   </th>
-                  {rows.map((r, i) => {
+                  {compared.map((r, i) => {
                     const has = (r.match_reasons || []).some(
                       (x) => x.toLowerCase() === c.toLowerCase()
                     );
@@ -153,7 +154,7 @@ export default function ComparisonTable({ rows, reconciliation }) {
                   <th scope="row" className="border-t border-slate-200 px-3 py-2 text-[13px] font-medium text-slate-600">
                     Rating
                   </th>
-                  {rows.map((r, i) => (
+                  {compared.map((r, i) => (
                     <Cell key={i} muted={typeof r.rating !== 'number'}>
                       {typeof r.rating === 'number' ? `${r.rating.toFixed(1)} ★` : '—'}
                     </Cell>
@@ -166,7 +167,7 @@ export default function ComparisonTable({ rows, reconciliation }) {
                   <th scope="row" className="border-t border-slate-200 px-3 py-2 text-[13px] font-medium text-slate-600">
                     Brand
                   </th>
-                  {rows.map((r, i) => {
+                  {compared.map((r, i) => {
                     const b = r.brand && r.brand.toLowerCase() !== 'unknown' ? r.brand : null;
                     return <Cell key={i} muted={!b}>{b || '—'}</Cell>;
                   })}
@@ -177,7 +178,7 @@ export default function ComparisonTable({ rows, reconciliation }) {
                 <th scope="row" className="border-t border-slate-200 px-3 py-2 text-[13px] font-medium text-slate-600">
                   Match
                 </th>
-                {rows.map((r, i) => (
+                {compared.map((r, i) => (
                   <Cell key={i}>
                     {typeof r.matched_constraints === 'number' && r.supported_constraints
                       ? `${r.matched_constraints}/${r.supported_constraints}`
@@ -190,9 +191,11 @@ export default function ComparisonTable({ rows, reconciliation }) {
                 <th scope="row" className="border-t border-slate-200 px-3 py-2 text-[13px] font-medium text-slate-600">
                   Source
                 </th>
-                {rows.map((r, i) => (
+                {compared.map((r, i) => (
                   <Cell key={i}>
-                    {r.url ? 'Live web' : 'Amazon 2020'}
+                    {r.source === 'web' || String(r.doc_id || '').startsWith('web-')
+                      ? 'Live web'
+                      : 'Amazon 2020'}
                   </Cell>
                 ))}
               </tr>

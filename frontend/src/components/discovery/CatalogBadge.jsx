@@ -35,10 +35,12 @@ export default function CatalogBadge({ catalog: provided }) {
           : 'border-amber-300 bg-amber-50 text-amber-900',
       ].join(' ')}
     >
+      {/* "searchable products" = the size of Pickly's Chroma index, which is a
+          curated subset of the source dataset — not the dataset's own size. */}
       {real ? <Database className="h-3 w-3" /> : <AlertTriangle className="h-3 w-3" />}
-      {real ? 'Amazon 2020 catalog' : 'Sample catalog (not real data)'}
+      {count && <span className="tabular-nums">{count} searchable products</span>}
       {count && <span className="text-slate-400">·</span>}
-      {count && <span className="tabular-nums text-slate-500">{count} products</span>}
+      {real ? 'Amazon 2020 dataset' : 'Sample data (not the real dataset)'}
     </span>
   );
 }

@@ -15,7 +15,7 @@ From the user's spoken request, extract:
   - eco_friendly: true only if eco/green/natural was explicitly implied, else null.
 - safety_flags: list of flags if the request involves unsafe chemical advice (e.g. mixing bleach and ammonia), ingestion of cleaning products, or other harmful intent. Empty list if safe.
 - needs_live: true ONLY if the user explicitly asks for current/latest price, availability, "right now", "in stock", or similar live information.
-- top_k: how many products the user asked to compare ("compare the best three options" -> 3, "show me five" -> 5). Default to 3 when unspecified.
+- top_k: how many products the user asked to compare, capped at 5 ("show me one" -> 1, "show me five" -> 5). Default to 3 when unspecified.
 
 <<few_shots>>
 

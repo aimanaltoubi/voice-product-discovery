@@ -20,6 +20,7 @@ from graph.nodes import (  # noqa: E402
     _extract_size,
     _explicitly_excludes_material,
     _find_phrase,
+    _identity_anchor_query,
     _lexical_anchor_terms,
     _matches_anchor,
     _matches_all_query_terms,
@@ -137,6 +138,10 @@ def test_safety() -> None:
 def test_query_and_anchor() -> None:
     assert _find_phrase("1000-piece jigsaw puzzle", "1000 piece") == "1000 piece"
     assert not _find_phrase("300 piece jigsaw puzzle", "1000 piece")
+    assert _identity_anchor_query(
+        {"product_type": "comforter", "qualitative_features": ["soft", "lightweight"]},
+        "soft lightweight comforter",
+    ) == "comforter"
     assert _query_terms("calendar less than 20 dollars") == ["calendar"]
     assert _query_terms("calendar under 20 dollars") == ["calendar"]
     assert _query_terms("eco friendly cleaner under fifteen dollars") == [

@@ -4,7 +4,6 @@ This folder holds the standalone evaluation for the project:
 
 - evaluation.ipynb - runs a fixed set of graded cases through the real pipeline and scores every model
 - evaluation_report.json and evaluation_cases.csv - written by the notebook after a run
-- this README - what is measured plus where the numbers live
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aimanaltoubi/voice-product-discovery/blob/main/evaluation/evaluation.ipynb)
 

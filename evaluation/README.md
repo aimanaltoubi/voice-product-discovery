@@ -15,7 +15,8 @@ This folder holds the standalone evaluation for the project:
 - answers: faithfulness and relevance scored by a judge model in the RAGAS style (Es et al. 2023)
 - cross-cutting: latency budgets per stage (router and safety and retrieval 8 s - answer 12 s) and a pass or fail verdict per case rolled up by category
 - ProofAgent Harness to evaluate the agents across these six metrics:
-    Task Success
+
+   Task Success
     
     Hallucination Resistance
     
@@ -27,7 +28,7 @@ This folder holds the standalone evaluation for the project:
     
     Tool Use
 
-The grading catalog is the bundled 24-product set because exact grading needs an exact answer key. One line in Part 2 of the notebook switches it to the Kaggle dataset.
+The grading catalog is the bundled 24-product set because exact grading needs an exact answer key. Part 2 of the notebook switches it to the Kaggle dataset.
 
 ## Latest measured results
 

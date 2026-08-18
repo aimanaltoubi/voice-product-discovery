@@ -20,6 +20,7 @@ import json
 import re
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 from app.config import settings
 from graph.llm import call_structured
@@ -91,6 +92,261 @@ _FEATURE_SYNONYMS: dict[str, tuple[str, ...]] = {
 }
 
 
+# --- product-type identity guard -------------------------------------------
+# Embeddings measure topical similarity, not product identity: "food storage
+# container set" and "Food Storage Bag Set" share three of four words, so a bag
+# outranks the one real container in the index. Identity therefore gets a
+# deterministic check while qualitative preferences ("durable", "easy to
+# clean") stay purely semantic.
+#
+# The rule is general, not per-product:
+#   1. take the HEAD NOUN of the requested type — the last meaningful word once
+#      packaging words are dropped ("food storage container set" -> container)
+#   2. require that noun (or a listed equivalent) to appear in the candidate's
+#      own title or category
+#   3. reject it when the noun is only modifying an accessory ("bottle brush",
+#      "lamp bulb") — i.e. the next word is itself an accessory head noun
+
+# Packaging/quantity words that are never the product itself.
+_TYPE_FILLER = {
+    "set", "sets", "pack", "packs", "piece", "pieces", "pc", "pcs", "count",
+    "kit", "bundle", "of", "the", "a", "an", "for", "with", "and", "new",
+    "best", "size", "sized", "style", "assorted", "multi",
+}
+
+# When the requested noun is immediately followed by one of these, the product
+# is an accessory FOR that thing, not the thing itself.
+_ACCESSORY_HEADS = {
+    "brush", "cleaner", "holder", "rack", "stand", "cover", "case", "bulb",
+    "shade", "filter", "refill", "replacement", "opener", "strap", "sleeve",
+    "organizer", "liner", "protector", "adapter", "charger", "mount", "hook",
+}
+
+# Conservative equivalences: same product class under a different common name.
+# Deliberately excludes near-misses like container/bag or comforter/blanket.
+_TYPE_EQUIVALENTS: dict[str, set[str]] = {
+    "backpack": {"backpack", "daypack", "rucksack", "bookbag", "knapsack"},
+    "puzzle": {"puzzle", "jigsaw"},
+    "container": {"container", "canister", "tub"},
+    "bottle": {"bottle", "flask", "canteen"},
+    "comforter": {"comforter", "duvet"},
+    "blanket": {"blanket", "throw"},
+    "sofa": {"sofa", "couch", "loveseat"},
+    "toy": {"toy", "game", "playset"},
+}
+
+
+def _singular(word: str) -> str:
+    if len(word) > 3 and word.endswith("ies"):
+        return word[:-3] + "y"
+    if len(word) > 3 and word.endswith("es") and word[-3] in "sxzh":
+        return word[:-2]
+    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        return word[:-1]
+    return word
+
+
+def _type_tokens(text: str) -> list[str]:
+    """Ordered, singularised tokens. Order matters here (unlike the set-based
+    `_tokens` used by reconciliation) because the accessory rule inspects the
+    word that follows the product noun."""
+    return [_singular(w) for w in re.split(r"[^a-z0-9]+", (text or "").lower()) if w]
+
+
+def requested_head_noun(product_type: str | None) -> str | None:
+    """The noun that identifies the product ('container' from 'food storage
+    container set'). Returns None when there is nothing specific to enforce."""
+    if not product_type:
+        return None
+    words = [w for w in _type_tokens(product_type) if w not in _TYPE_FILLER]
+    return words[-1] if words else None
+
+
+def product_type_compatible(product_type: str | None, row: dict) -> bool:
+    """True when `row` plausibly IS the requested kind of product.
+
+    Permissive by design — it only rejects candidates that fail to mention the
+    requested product noun anywhere in their own title or category, or that use
+    it as a modifier for an accessory. Everything else is left to semantics.
+    """
+    head = requested_head_noun(product_type)
+    if not head:
+        return True                      # no explicit type -> nothing to enforce
+    accepted = _TYPE_EQUIVALENTS.get(head, {head})
+    title_tokens = _type_tokens(row.get("title") or "")
+
+    for i, tok in enumerate(title_tokens):
+        if tok in accepted:
+            # Look two tokens ahead: an adjective often sits between the noun
+            # and the accessory ("water bottle CLEANING brush", "desk lamp
+            # REPLACEMENT bulb").
+            lookahead = title_tokens[i + 1:i + 3]
+            if any(w in _ACCESSORY_HEADS for w in lookahead):
+                continue                 # accessory FOR the product, keep looking
+            return True
+
+    # Fall back to the catalog's own taxonomy for titles that never name the
+    # product ("Melissa & Doug Wooden Construction Building Set" under Toys &
+    # Games). Only the ROOT and LEAF segments count: the aisles in between are
+    # shelves, not identities. Amazon files reusable sandwich bags under
+    # "... | Travel & To-Go Food Containers | Lunch Bags" — matching the middle
+    # segment is exactly what let a bag pass as a container.
+    segments = [s for s in (row.get("category") or "").split("|") if s.strip()]
+    if not segments:
+        return False
+    for seg in {segments[0], segments[-1]}:
+        if any(tok in accepted for tok in _type_tokens(seg)):
+            return True
+    return False
+
+
+# --- audience compatibility -------------------------------------------------
+# The router already extracts `audience` and it survives refinement correctly —
+# verified by tracing the college-dorm journey. What was missing was ENFORCEMENT:
+# `demote_child_products` only re-ordered kid-targeted rows, so "Heritage Kids
+# Prima Ballerina" still surfaced for a college student. When the shopper is
+# explicitly an adult we now exclude rather than demote.
+#
+# Reuses the existing `wants_child_products` / `_is_child_product` helpers
+# defined below rather than introducing a second set of markers.
+
+
+def audience_is_explicitly_adult(constraints: dict) -> bool:
+    audience = (constraints.get("audience") or "").lower()
+    use_case = (constraints.get("use_case") or "").lower()
+    if not audience:
+        return False
+    if any(w in audience for w in ("child", "kid", "toddler", "baby", "infant", "teen")):
+        return False
+    return bool(re.search(
+        r"\b(adult|men|man|women|woman|college|student|dorm|myself|me|couple|"
+        r"grown[- ]?up|professional)\b", f"{audience} {use_case}", re.I))
+
+
+def audience_compatible(constraints: dict, row: dict) -> bool:
+    """False only when an explicitly child-targeted product is offered to an
+    explicitly adult shopper. Child and unknown audiences are never filtered,
+    so kids products stay fully eligible for a child request."""
+    if not audience_is_explicitly_adult(constraints):
+        return True
+    return not _is_child_product(row)
+
+
+# --- hard-constraint verification for live results --------------------------
+def hard_constraint_status(row: dict, constraints: dict) -> dict:
+    """Split the must-haves into verified / unknown / failed for one row.
+
+    A live search snippet often omits the price. "Unknown" is emphatically not
+    "satisfied": a $25 budget cannot be met by a product whose price we never
+    saw, so such a row can never be an exact match or a Top pick.
+    """
+    verified: list[str] = []
+    unknown: list[str] = []
+    failed: list[str] = []
+    blob = _evidence_blob(row)
+
+    budget = constraints.get("budget")
+    if isinstance(budget, (int, float)):
+        price = row.get("price")
+        if isinstance(price, (int, float)):
+            (verified if price <= budget else failed).append(f"Under {_money(budget)}")
+        else:
+            unknown.append(f"Under {_money(budget)}")
+
+    for field in ("size", "material", "brand"):
+        want = constraints.get(field)
+        if not want:
+            continue
+        (verified if _find_phrase(blob, str(want).lower()) else unknown).append(str(want))
+
+    for feat in constraints.get("required_features") or []:
+        (verified if _find_phrase(blob, _FEATURE_SYNONYMS.get(str(feat).lower(), (str(feat).lower(),)))
+         else unknown).append(str(feat))
+
+    return {
+        "verified": verified,
+        "unknown": unknown,
+        "failed": failed,
+        "all_verified": not unknown and not failed,
+    }
+
+
+# --- live web result validation --------------------------------------------
+# A search hit is not a product. Before a web row can become a recommendation
+# card it must look like a specific product page: a real title, a URL that is
+# not a homepage/search/category page, and evidence that it is the product type
+# the user actually asked for. Anything else stays a source, never a card.
+
+# Titles that describe a page, not a product.
+_GENERIC_TITLE_RX = re.compile(
+    r"^(shop|buy|browse|search|explore|discover)\b.{0,24}$"
+    r"|check\s+a?\s*price|price\s*check|compare\s+prices"
+    r"|search\s+results?|all\s+results"
+    r"|^\s*(walmart|amazon|target|lowe'?s|home\s*depot|best\s*buy|costco|wayfair)"
+    r"(\.com)?\s*(\||-|:)?\s*(official)?\s*(site|store|online)?\s*$"
+    r"|official\s+site|official\s+store"
+    r"|domain\s+name|register\s+domain|web\s*hosting"
+    r"|coupon|promo\s+code|deals?\s+of\s+the\s+day"
+    r"|customer\s+service|help\s+cent|return\s+policy|track\s+your\s+order",
+    re.I,
+)
+
+# URL paths that are navigation rather than a product listing.
+_NON_PRODUCT_PATH_RX = re.compile(
+    r"^/?$"                                   # homepage
+    r"|/(search|s|results)(/|\?|$)"
+    r"|/(cp|c|b|browse|category|categories|shop|store|deals|collections?)(/|$)"
+    r"|/(help|support|customer-service|returns?|policies)(/|$)",
+    re.I,
+)
+
+# Path shapes retailers use for an individual product page.
+_PRODUCT_PATH_RX = re.compile(r"/(dp|ip|pd|p|product|products|item|itm)/", re.I)
+
+
+def _retailer_from_url(url: str) -> str:
+    """Human-readable retailer name for link copy ('View at Walmart')."""
+    host = (urlparse(url or "").netloc or "").lower().removeprefix("www.")
+    if not host:
+        return ""
+    name = host.split(".")[0]
+    pretty = {
+        "amazon": "Amazon", "walmart": "Walmart", "target": "Target",
+        "lowes": "Lowe's", "homedepot": "Home Depot", "bestbuy": "Best Buy",
+        "costco": "Costco", "wayfair": "Wayfair", "kohls": "Kohl's",
+        "overstock": "Overstock", "ebay": "eBay", "etsy": "Etsy",
+    }
+    return pretty.get(name, name.replace("-", " ").title())
+
+
+def qualifies_as_live_product(row: dict, product_type: str | None) -> tuple[bool, str]:
+    """Can this web result stand as a product recommendation?
+
+    Returns (ok, rejection_reason). Deliberately strict: showing a retailer's
+    "check a price" landing page as a TOP PICK is worse than showing nothing.
+    """
+    title = (row.get("title") or "").strip()
+    url = (row.get("url") or "").strip()
+    if not title or not url:
+        return False, "missing title or url"
+    if len(title) < 12:
+        return False, "title too short to identify a product"
+    if _GENERIC_TITLE_RX.search(title):
+        return False, "generic page title"
+
+    parsed = urlparse(url)
+    path = parsed.path or "/"
+    is_product_path = bool(_PRODUCT_PATH_RX.search(path))
+    if not is_product_path and _NON_PRODUCT_PATH_RX.search(path):
+        return False, "navigation/category/search URL"
+
+    # Same identity rule as the private catalog, applied to the title (web rows
+    # carry no category, so the taxonomy fallback cannot help here).
+    if product_type and not product_type_compatible(product_type, {"title": title}):
+        return False, f"not a {requested_head_noun(product_type)}"
+    return True, ""
+
+
 # --- search-session refinement ---------------------------------------------
 # A refinement is not a new search: the utterance ("make it machine washable")
 # is parsed by the same Router, then merged onto the constraints the session
@@ -103,10 +359,14 @@ _FEATURE_SYNONYMS: dict[str, tuple[str, ...]] = {
 _REPLACE_FIELDS = (
     "product_type", "budget", "size", "audience", "use_case",
     "brand", "category", "material", "eco_friendly",
+    # colours are mutually exclusive: "make it green" replaces pink
+    "color",
+    # priority promotions are set explicitly by the UI, never inferred
+    "required_features",
 )
 _PRODUCT_DEPENDENT_FIELDS = (
     "category", "brand", "material", "size", "use_case",
-    "eco_friendly", "qualitative_features",
+    "eco_friendly", "qualitative_features", "color", "required_features",
 )
 
 
@@ -123,6 +383,18 @@ def merge_constraints(prior: dict | None, new: dict | None) -> dict:
         # budget and audience describe the shopper and remain useful.
         for field in _PRODUCT_DEPENDENT_FIELDS:
             merged.pop(field, None)
+    # A replaced colour must also carry its priority across: if "pink" was a
+    # must-have, "green" is too — otherwise the promotion would silently vanish
+    # along with the old colour.
+    old_color = prior.get("color")
+    new_color = new.get("color")
+    if (not pivot and old_color and new_color
+            and str(old_color).lower() != str(new_color).lower()):
+        req = list(merged.get("required_features") or [])
+        if any(str(r).lower() == str(old_color).lower() for r in req):
+            merged["required_features"] = [
+                r for r in req if str(r).lower() != str(old_color).lower()
+            ] + [new_color]
     for field in _REPLACE_FIELDS:
         value = new.get(field)
         if value not in (None, "", []):
@@ -147,11 +419,16 @@ def diff_constraints(prior: dict | None, merged: dict) -> list[str]:
     prior = prior or {}
     changes: list[str] = []
     for field in _REPLACE_FIELDS:
+        if field == "required_features":
+            continue        # internal priority bookkeeping, not user-facing copy
         before, after = prior.get(field), merged.get(field)
         if after in (None, "") or before == after:
             continue
         label = field.replace("_", " ").capitalize()
-        if field == "budget":
+        if field == "color":
+            changes.append(f"Color: {_titlecase(str(before))} → {_titlecase(str(after))}"
+                           if before else f"Color: {_titlecase(str(after))}")
+        elif field == "budget":
             changes.append(f"Budget: {_money(before)} → {_money(after)}" if before
                            else f"Budget: ≤ {_money(after)}")
         elif before:
@@ -174,7 +451,7 @@ def compose_query(constraints: dict, fallback: str = "") -> str:
     its own, and the best product may sit outside the previous top 3.
     """
     c = constraints or {}
-    parts = [c.get("product_type"), c.get("size"), c.get("material")]
+    parts = [c.get("product_type"), c.get("size"), c.get("color"), c.get("material")]
     parts += list(c.get("qualitative_features") or [])
     if c.get("audience"):
         parts.append(f"for {c['audience']}")
@@ -259,11 +536,18 @@ def _evidence_blob(row: dict) -> str:
 
 
 def _find_phrase(blob: str, candidates: tuple[str, ...] | str) -> str | None:
-    """Return the first candidate phrase literally present in `blob`."""
+    """Return the first grounded phrase present in `blob`.
+
+    Spaces, slashes, and hyphens are equivalent separators so a request for
+    "1000 piece" is supported by a title containing "1000-piece", while the
+    words themselves still have to occur in order in the product evidence.
+    """
     if isinstance(candidates, str):
         candidates = (candidates,)
     for phrase in candidates:
-        if phrase and phrase.lower() in blob:
+        tokens = re.findall(r"[a-z0-9]+", (phrase or "").lower())
+        pattern = r"\b" + r"[\s/\-]+".join(map(re.escape, tokens)) + r"\b" if tokens else ""
+        if pattern and re.search(pattern, blob, re.I):
             return phrase
     return None
 
@@ -382,6 +666,15 @@ def match_evidence(row: dict, constraints: dict) -> dict:
             # Prefer a richer literal form when the record has one ("twin/twin xl").
             m = re.search(rf"\b[\w/]*{re.escape(hit)}[\w/]*(?:\s+x{{1,2}}l)?\b", blob)
             reasons.append(_display_size((m.group(0) if m else hit).strip()))
+
+    # Colour — grounded in the product's own text, never inferred from an image.
+    color = constraints.get("color")
+    if color:
+        supported += 1
+        hit = _find_phrase(blob, str(color).lower())
+        if hit:
+            matched += 1
+            reasons.append(_titlecase(hit))
 
     # HARD: brand — only when the user asked for one.
     brand = constraints.get("brand")
@@ -532,7 +825,7 @@ _QUERY_STOPWORDS = {
     "for", "with", "the", "and", "kids", "kid", "child", "children", "mom",
     "mother", "dad", "father", "boy", "boys", "girl", "girls",
     "year", "years", "old", "please", "me",
-    "kit", "model", "set",
+    "kit", "model", "set", "piece", "pieces", "pc", "pcs", "count",
 }
 
 _MATERIAL_PATTERNS = {
@@ -546,6 +839,27 @@ _MATERIAL_PATTERNS = {
     "aluminum": re.compile(r"\b(?:aluminum|aluminium)\b", re.I),
     "non-toxic": re.compile(r"\bnon[- ]?toxic\b", re.I),
 }
+
+
+def _extract_size(text: str) -> str | None:
+    """Extract only high-confidence, literal size/variant expressions.
+
+    This is a Router backstop, not an open-ended parser. It covers quantities
+    whose omission changes product identity (for example a 1000-piece puzzle)
+    and common bedding sizes, then lets the normal evidence guard enforce the
+    resulting constraint against each retrieved row.
+    """
+    piece = re.search(r"\b(\d{2,5})[\s-]*(?:piece|pieces|pc|pcs)\b", text, re.I)
+    if piece:
+        return f"{piece.group(1)} piece"
+    bedding = re.search(
+        r"\b(california\s+king|twin(?:\s*/\s*twin)?\s+xl|twin|full|queen|king)\b"
+        r"(?=.{0,28}\b(?:bed|bedding|comforter|duvet|sheet|mattress|blanket|quilt)\b)",
+        text, re.I,
+    )
+    if bedding:
+        return re.sub(r"\s+", " ", bedding.group(1).lower())
+    return None
 _MATERIAL_NEGATION_RE = re.compile(
     r"\b(?:no|without|avoid(?:ing)?|free\s+of)(?:\s+\w+){0,2}\s*$", re.I,
 )
@@ -622,6 +936,18 @@ def _requires_all_anchors(router: dict) -> bool:
     )
 
 
+def _identity_anchor_query(constraints: dict, spoken: str) -> str:
+    """Hard lexical identity excludes soft ranking preferences by design."""
+    return (
+        " ".join(
+            str(value)
+            for value in (constraints.get("brand"), constraints.get("product_type"))
+            if value
+        )
+        or spoken
+    )
+
+
 def _matches_all_query_terms(row: dict, terms: set[str]) -> bool:
     title = str(row.get("title") or "")
     return bool(terms) and all(
@@ -668,6 +994,24 @@ _LIVE_RE = re.compile(
     re.I,
 )
 
+_COUNT_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4,
+    "five": 5, "six": 6, "seven": 7, "eight": 8,
+}
+
+
+def _requested_top_k(text: str) -> int | None:
+    """Read an explicit result count and cap it to the supported 1..8 range."""
+    match = re.search(
+        r"\b(?:compare|show|top|best)\b.{0,36}?\b(\d+|one|two|three|four|five|six|seven|eight)\b",
+        text, re.I,
+    )
+    if not match:
+        return None
+    raw = match.group(1).lower()
+    count = int(raw) if raw.isdigit() else _COUNT_WORDS[raw]
+    return max(1, min(count, 8))
+
 
 def _rating_from_text(*texts: str) -> float | None:
     for text in texts:
@@ -685,9 +1029,25 @@ _MONEY_RE = re.compile(
 _LIMIT_RE = re.compile(r"\b(?:under|below|less than|up to|no more than|max(?:imum)?)\b", re.I)
 _AGE_RE = re.compile(r"\b\d+\s*(?:\+\s*)?(?:year|yr|month|mo)s?\b|\bages?\b", re.I)
 _ECO_REQUEST_RE = re.compile(
-    r"\b(?:eco(?:[- ]friendly)?|green|sustainab\w*|biodegradable|plant[- ]based|non[- ]?toxic)\b",
+    r"\b(?:eco(?:[- ]friendly)?|sustainab\w*|biodegradable|plant[- ]based|"
+    r"non[- ]?toxic|environment(?:al(?:ly)?)?[- ]friendly|recycled)\b",
     re.I,
 )
+
+_COLORS = (
+    "black", "white", "gray", "grey", "red", "orange", "yellow", "green",
+    "blue", "purple", "pink", "brown", "beige", "navy", "teal", "silver",
+    "gold", "cream", "mint",
+)
+
+
+def _extract_color(text: str) -> str | None:
+    color = next((c for c in _COLORS if re.search(rf"\b{c}\b", text, re.I)), None)
+    if color == "green" and _ECO_REQUEST_RE.search(text) and not re.search(
+        r"\b(?:color|colour|shade|tone)\b", text, re.I,
+    ):
+        return None
+    return "gray" if color == "grey" else color
 
 
 def _budget_is_grounded(text: str) -> bool:
@@ -746,6 +1106,18 @@ def _price_from_text(*texts: str) -> float | None:
     return None
 
 
+def _price_mentions(*texts: str) -> list[float]:
+    """Dollar amounts stated in generated prose, normalized for comparison."""
+    values: list[float] = []
+    for text in texts:
+        for match in _PRICE_RE.finditer(text or ""):
+            try:
+                values.append(float(match.group(1).replace(",", "")))
+            except ValueError:
+                continue
+    return values
+
+
 # --------------------------------------------------------------------------
 # node factory
 # --------------------------------------------------------------------------
@@ -768,7 +1140,7 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                 "constraints": c,
                 "safety_flags": [],
                 "needs_live": bool(state.get("prior_needs_live")),
-                "top_k": max(1, min(int(state.get("prior_top_k") or 3), 5)),
+                "top_k": max(1, min(int(state.get("prior_top_k") or 6), 8)),
             }
             effective = compose_query(c, transcript)
             return {
@@ -824,6 +1196,26 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                 )
             constraints["material"] = explicit_material
 
+        explicit_size = _extract_size(transcript)
+        extracted_size = constraints.get("size")
+        if extracted_size and not _find_phrase(transcript.lower(), str(extracted_size).lower()):
+            dropped.append(f"size={extracted_size!r} (not in the utterance)")
+            constraints["size"] = None
+        if explicit_size and _norm(str(constraints.get("size") or "")) != _norm(explicit_size):
+            if constraints.get("size"):
+                dropped.append(
+                    f"size={constraints.get('size')!r} replaced with explicit {explicit_size!r}"
+                )
+            constraints["size"] = explicit_size
+
+        explicit_color = _extract_color(transcript)
+        extracted_color = constraints.get("color")
+        if extracted_color and not _find_phrase(transcript.lower(), str(extracted_color).lower()):
+            dropped.append(f"color={extracted_color!r} (not in the utterance)")
+            constraints["color"] = None
+        if explicit_color:
+            constraints["color"] = explicit_color
+
         llm_needs_live = bool(router.get("needs_live"))
         llm_task = router.get("task")
         rating_request = bool(_RATING_REQUEST_RE.search(transcript))
@@ -849,6 +1241,9 @@ def build_nodes(mcp: MCPToolClient) -> dict:
             "price_check" if router["needs_live"] else
             "product_recommendation"
         )
+        requested_count = _requested_top_k(transcript)
+        if requested_count is not None:
+            router["top_k"] = requested_count
 
         inferred_product_type = None
         if (
@@ -879,16 +1274,15 @@ def build_nodes(mcp: MCPToolClient) -> dict:
             changes = diff_constraints(prior, merged)
             router["constraints"] = merged
             # top_k is only meaningful when this utterance asked for a count.
-            if not re.search(r"\b(compare|show|top|best)\b.*\b(\d+|three|four|five)\b",
-                             transcript, re.I):
-                router["top_k"] = state.get("prior_top_k") or router.get("top_k") or 3
-        router["top_k"] = max(1, min(int(router.get("top_k") or 3), 5))
+            if requested_count is None:
+                router["top_k"] = state.get("prior_top_k") or router.get("top_k") or 6
+        router["top_k"] = max(1, min(int(router.get("top_k") or 6), 8))
 
         c = router.get("constraints") or {}
         bits = [
             c.get("product_type"),
             c.get("size"),
-            f"≤ {_money(c["budget"])}" if isinstance(c.get("budget"), (int, float)) else None,
+            f"≤ {_money(c['budget'])}" if isinstance(c.get("budget"), (int, float)) else None,
             *(c.get("qualitative_features") or []),
         ]
         detail = " · ".join(_titlecase(str(b)) for b in bits if b)
@@ -1097,11 +1491,11 @@ def build_nodes(mcp: MCPToolClient) -> dict:
             candidates = []
             rating_catalog_unsupported = rating_request
         spoken = state["transcript"]
-        anchor_query = (
-            spoken if product_type and _norm(product_type) in _norm(spoken)
-            else " ".join(str(v) for v in (router_c.get("brand"), product_type) if v)
-            or spoken
-        )
+        # Identity anchors come only from structured identity fields. Using the
+        # full utterance here turns soft preferences such as "soft" and
+        # "lightweight" into mandatory title tokens, rejecting otherwise valid
+        # products before the semantic reranker can prioritize those qualities.
+        anchor_query = _identity_anchor_query(router_c, spoken)
         exact_terms = set(_query_terms(anchor_query))
         category_retry = None
         if (state.get("router") or {}).get("needs_live") and len(exact_terms) >= 2:
@@ -1148,33 +1542,122 @@ def build_nodes(mcp: MCPToolClient) -> dict:
         candidates = dedupe_listings(candidates)
         duplicates_dropped = before_dupes - len(candidates)
 
-        want = max(1, min(int((state.get("router") or {}).get("top_k") or 3), 5))
+        want = max(1, min(int((state.get("router") or {}).get("top_k") or 6), 8))
 
-        # --- HARD-constraint guard -----------------------------------------
+        # --- 1. PRODUCT-IDENTITY guard --------------------------------------
+        # Deterministic, and applied before ranking: the reranker cannot be
+        # trusted to reject a sibling category the embeddings scored highly.
+        # Dropping a candidate here means we return fewer results rather than
+        # padding top_k with the wrong kind of product.
+        wanted_type = router_c.get("product_type")
+        type_rejected = [c for c in candidates if not product_type_compatible(wanted_type, c)]
+        if type_rejected:
+            candidates = [c for c in candidates if product_type_compatible(wanted_type, c)]
+
+        # --- 1a. AUDIENCE guard ---------------------------------------------
+        # Only bites when the shopper is explicitly an adult; child requests are
+        # untouched so kids products stay eligible for them.
+        audience_rejected: list[dict] = []
+        no_match_audience: dict[str, Any] | None = None
+        if audience_is_explicitly_adult(router_c) and candidates:
+            keep = []
+            for c in candidates:
+                if audience_compatible(router_c, c):
+                    keep.append(c)
+                else:
+                    audience_rejected.append({"doc_id": c.get("doc_id"), "title": c.get("title")})
+            candidates = keep
+            # Excluding is right, but an empty screen is not an answer. When the
+            # audience filter removes everything, say so explicitly and offer the
+            # excluded rows as clearly-labelled "closest alternatives" rather
+            # than silently promoting kids products back into the results.
+            if not candidates and audience_rejected:
+                no_match_audience = {
+                    "match_status": "no_exact_match",
+                    "failed_constraints": ["audience"],
+                    "requested_max_price": router_c.get("budget"),
+                    "closest_available_price": None,
+                    "closest_alternatives": [
+                        {**c, **match_evidence(c, router_c)}
+                        for c in (
+                            [x for x in resp.get("results", [])
+                             if x.get("doc_id") in {a["doc_id"] for a in audience_rejected}]
+                        )[:want]
+                    ],
+                }
+
+        # --- 1b. Explicit size / variant guard -----------------------------
+        # Size is a hard constraint in the Router contract. Semantic proximity
+        # cannot turn a 14-piece puzzle into a 1000-piece puzzle or a full
+        # comforter into a twin, so require literal evidence and return fewer
+        # rows (or a labelled no-match) instead of padding the requested count.
+        wanted_size = router_c.get("size")
+        size_rejected: list[dict] = []
+        no_match_size: dict[str, Any] | None = None
+        if wanted_size and candidates:
+            before_size = list(candidates)
+            candidates = [
+                c for c in candidates
+                if _find_phrase(_evidence_blob(c), str(wanted_size).lower())
+            ]
+            size_rejected = [
+                {"doc_id": c.get("doc_id"), "title": c.get("title")}
+                for c in before_size if c not in candidates
+            ]
+            if not candidates:
+                no_match_size = {
+                    "match_status": "no_exact_match",
+                    "failed_constraints": ["size"],
+                    "requested_size": str(wanted_size),
+                    "requested_max_price": router_c.get("budget"),
+                    "closest_available_price": None,
+                    "closest_alternatives": [
+                        {**c, **match_evidence(c, router_c)} for c in before_size[:want]
+                    ],
+                }
+
+        # --- 1c. Promoted must-have preferences -----------------------------
+        # Preferences are normally soft (they steer ranking). Anything the user
+        # promoted via "Edit priorities" becomes hard: without literal evidence
+        # in the record, the product is not an exact match. Uses the same
+        # grounding as the chips, so a must-have can only be satisfied by text
+        # the product itself carries.
+        required = [f for f in (router_c.get("required_features") or []) if str(f).strip()]
+        feature_rejected: list[dict] = []
+        if required and candidates:
+            kept = []
+            for c in candidates:
+                ev = match_evidence(c, {"qualitative_features": required})
+                if ev["matched_constraints"] == len(required):
+                    kept.append(c)
+                else:
+                    feature_rejected.append({"doc_id": c.get("doc_id"), "title": c.get("title")})
+            candidates = kept
+
+        # --- 2. HARD-constraint guard (budget) ------------------------------
         # Never let an over-budget row be presented as a match. rag.search
         # already filters on price, but its relaxation ladder can drop that
         # filter; re-check here so the budget is enforced no matter what.
         budget = router_c.get("budget")
-        no_match: dict[str, Any] | None = None
-        if isinstance(budget, (int, float)):
+        no_match: dict[str, Any] | None = no_match_audience or no_match_size
+        if isinstance(budget, (int, float)) and no_match is None:
             within = [c for c in candidates if isinstance(c.get("price"), (int, float))
                       and c["price"] <= budget]
             if not within:
                 # rag.search applies the price filter itself, so an empty result
-                # cannot tell us *why* it is empty. Re-query without the budget:
-                #   probe has rows -> the catalog stocks this product, just not
-                #                     at this price  -> honest budget no-match
-                #   probe is empty -> nothing relevant at any price -> ordinary
-                #                     "no private match" -> existing web fallback
-                # Blaming the budget in the second case would name the wrong
-                # constraint and quote a price that does not exist.
-                # Same filters, price removed — so a non-empty probe means
-                # "this product exists here, just not at your price". Dropping
-                # every filter instead would blame the budget for a miss the
-                # category or material filter actually caused.
+                # cannot say *why* it is empty. Re-query without the budget and
+                # keep only same-type rows, so we can tell the two cases apart:
+                #   same-type rows exist -> the catalog stocks this product,
+                #                           just not this cheaply -> budget
+                #   none                 -> we simply do not carry this product
+                # Quoting a price from an unrelated row is what produced
+                # "raise your budget to $7.86" against a $37 budget.
                 probe_args = {k: v for k, v in args.items() if k != "max_price"}
                 probe = await mcp.call("rag.search", probe_args)
-                probe_rows = [r for r in probe.get("results", []) if r.get("doc_id")]
+                probe_rows = [
+                    r for r in probe.get("results", [])
+                    if r.get("doc_id") and product_type_compatible(wanted_type, r)
+                ]
                 probe_anchors = _lexical_anchor_terms(anchor_query, probe_rows)
                 probe_rows = [r for r in probe_rows if _matches_anchor(
                     r, probe_anchors, require_all=require_all_anchors,
@@ -1186,20 +1669,55 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                 probe_rows = [r for r in probe_rows if _matches_material(r, f.get("material"))]
                 if adult_recipient:
                     probe_rows = [r for r in probe_rows if not _is_child_product(r)]
-                prices = [r["price"] for r in probe_rows
-                          if isinstance(r.get("price"), (int, float))]
-                if probe_rows:
+                if wanted_size:
+                    probe_rows = [
+                        r for r in probe_rows
+                        if _find_phrase(_evidence_blob(r), str(wanted_size).lower())
+                    ]
+                if required:
+                    probe_rows = [
+                        r for r in probe_rows
+                        if match_evidence(r, {"qualitative_features": required})[
+                            "matched_constraints"
+                        ] == len(required)
+                    ]
+                # Only prices ABOVE the current budget can justify raising it.
+                higher = sorted(
+                    (r for r in probe_rows
+                     if isinstance(r.get("price"), (int, float)) and r["price"] > budget),
+                    key=lambda r: r["price"],
+                )
+                if higher:
                     no_match = {
                         "match_status": "no_exact_match",
                         "failed_constraints": ["max_price"],
                         "requested_max_price": float(budget),
-                        "closest_available_price": min(prices) if prices else None,
-                        "closest_alternatives": [{**_slim(r), "image": r.get("image")} for r in sorted(
-                            probe_rows,
-                            key=lambda r: (r.get("price") if isinstance(r.get("price"), (int, float)) else 1e9),
-                        )[:want]],
+                        "closest_available_price": higher[0]["price"],
+                        "closest_alternatives": [
+                            {**r, **match_evidence(r, router_c)} for r in higher[:want]
+                        ],
+                    }
+                else:
+                    # Same-type products are absent (or priced below budget yet
+                    # still filtered out) — budget is not the blocker, so no
+                    # price is suggested and no unrelated card is shown.
+                    no_match = {
+                        "match_status": "no_exact_match",
+                        "failed_constraints": ["product_type"],
+                        "requested_max_price": float(budget),
+                        "closest_available_price": None,
+                        "closest_alternatives": [],
                     }
             candidates = within
+        elif wanted_type and not candidates and type_rejected:
+            # No budget in play: everything retrieved was the wrong product.
+            no_match = {
+                "match_status": "no_exact_match",
+                "failed_constraints": ["product_type"],
+                "requested_max_price": None,
+                "closest_available_price": None,
+                "closest_alternatives": [],
+            }
 
         rerank_info: dict[str, Any] = {}
         top_picks: list[dict] = []
@@ -1261,8 +1779,8 @@ def build_nodes(mcp: MCPToolClient) -> dict:
         detail = (f"MCP → rag.search · {len(candidates)} candidates found"
                   if candidates else "MCP → rag.search · no qualifying products")
         if no_match:
-            detail = (f"MCP → rag.search · nothing at or below "
-                      f"{_money(no_match["requested_max_price"])}")
+            failed = ", ".join(no_match.get("failed_constraints") or ["hard constraint"])
+            detail = f"MCP → rag.search · no exact match ({failed})"
 
         out_state: dict[str, Any] = {
             "candidates": candidates,
@@ -1282,6 +1800,17 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                     "relaxations": resp.get("relaxations"),
                     "relevance_floor": resp.get("relevance_floor"),
                     "dropped_below_floor": resp.get("dropped_below_floor"),
+                    "product_type_required": wanted_type,
+                    "audience_required": "adult" if audience_is_explicitly_adult(router_c) else None,
+                    "dropped_wrong_audience": audience_rejected or None,
+                    "requested_size": wanted_size,
+                    "dropped_wrong_size": size_rejected or None,
+                    "required_features": required or None,
+                    "dropped_missing_required_feature": feature_rejected or None,
+                    "dropped_wrong_product_type": [
+                        {"doc_id": r.get("doc_id"), "title": r.get("title")}
+                        for r in type_rejected
+                    ] or None,
                     "error": resp.get("error"),
                     "excluded_for_recipient": excluded_for_recipient,
                     "excluded_materials": sorted(excluded_materials),
@@ -1310,8 +1839,13 @@ def build_nodes(mcp: MCPToolClient) -> dict:
     def route_after_retrieve(state: dict) -> str:
         # A hard constraint that nothing satisfies is an answer in itself — go
         # straight to the answerer rather than quietly firing a live web search
-        # the user never asked for.
+        # the user never asked for. But when the user HAS explicitly asked for
+        # live information (the no-match screen's "Search online" sets this),
+        # a no-match must not swallow that request: fall through to the live
+        # path so the search can still be answered from the web.
         if state.get("no_match"):
+            if (state.get("router") or {}).get("needs_live"):
+                return "web_fallback"
             return "answer"
         if not state.get("top_picks"):
             return "web_fallback"
@@ -1359,53 +1893,121 @@ def build_nodes(mcp: MCPToolClient) -> dict:
 
     # ---- 5b. Web fallback (private catalog had no match) -------------------
     async def web_fallback_node(state: dict) -> dict:
-        transcript = state["transcript"]
+        # Search the accumulated intent. A refinement such as "check current
+        # prices" is not useful on its own; the retained product constraints
+        # must stay in the live query.
+        query = state.get("effective_query") or state["transcript"]
         filters = ((state.get("plan") or {}).get("retrieval_filters") or {})
         max_price = filters.get("max_price")
         material = filters.get("material")
-        rating_request = bool(_RATING_REQUEST_RE.search(transcript))
-        review_request = bool(_REVIEW_REQUEST_RE.search(transcript))
+        rating_request = bool(_RATING_REQUEST_RE.search(query))
+        review_request = bool(_REVIEW_REQUEST_RE.search(query))
         suffix = ("product rating reviews" if rating_request else
                   "customer reviews" if review_request else "buy price")
-        args = {"query": f"{transcript} {suffix}", "max_results": 6}
+        want = max(1, min(int((state.get("router") or {}).get("top_k") or 6), 8))
+        args = {"query": f"{query} {suffix}", "max_results": max(6, want)}
         resp = await mcp.call("web.search", args)
-        raw_rows = []
+
+        router_c = (state.get("router") or {}).get("constraints") or {}
+        wanted_type = router_c.get("product_type")
+        require_all_anchors = _requires_all_anchors(state.get("router") or {})
+        excluded_materials = _excluded_materials(query)
+
+        raw_rows: list[dict] = []
+        rejected: list[dict] = []
         for i, r in enumerate(resp.get("results", [])):
+            ok, why = qualifies_as_live_product(r, wanted_type)
+            if not ok:
+                rejected.append({"title": r.get("title"), "url": r.get("url"),
+                                 "reason": why})
+                continue
+            # A price/rating parsed from the result's own title or snippet is
+            # retrieved evidence. If neither contains one, leave it unknown.
+            price = (r.get("price") if isinstance(r.get("price"), (int, float))
+                     else _price_from_text(r.get("snippet", ""), r.get("title", "")))
+            rating = _rating_from_text(r.get("snippet", ""), r.get("title", ""))
             raw_rows.append({
-                "doc_id": f"web-{i + 1}",
-                "sku": f"web-{i + 1}",
+                "doc_id": f"web-{len(raw_rows) + 1}",
+                "sku": f"web-{len(raw_rows) + 1}",
                 "title": r.get("title"),
                 "brand": None,
-                "price": r.get("price") if isinstance(r.get("price"), (int, float))
-                         else _price_from_text(r.get("snippet", ""), r.get("title", "")),
-                "rating": _rating_from_text(r.get("snippet", ""), r.get("title", "")),
+                "price": price,
+                "price_verified": price is not None,
+                "rating": rating,
                 "features": r.get("snippet"),
                 "url": r.get("url"),
+                "retailer": _retailer_from_url(r.get("url") or ""),
                 "availability": r.get("availability"),
                 "source": "web",
             })
-        constraints = ((state.get("router") or {}).get("constraints") or {})
-        require_all_anchors = _requires_all_anchors(state.get("router") or {})
-        excluded_materials = _excluded_materials(
-            state.get("effective_query") or state["transcript"]
-        )
-        anchor_query = str(constraints.get("product_type") or transcript)
+
+        anchor_query = str(wanted_type or query)
         anchors = _lexical_anchor_terms(anchor_query, raw_rows)
-        rows = [
-            row for row in raw_rows
-            if _web_row_allowed(
-                row, anchors, max_price, material,
+        rows: list[dict] = []
+        for row in raw_rows:
+            # Identity/material/negative-material guards are deterministic.
+            # Budget is handled below so a missing price can be shown only as
+            # a related, explicitly unverified option rather than disappearing.
+            if not _web_row_allowed(
+                row, anchors, None, material,
                 excluded_materials, require_all_anchors,
-            )
-            and (not rating_request or isinstance(row.get("rating"), (int, float)))
-        ]
+            ):
+                rejected.append({"title": row.get("title"), "url": row.get("url"),
+                                 "reason": "fails live retrieval filters"})
+                continue
+            if rating_request and not isinstance(row.get("rating"), (int, float)):
+                rejected.append({"title": row.get("title"), "url": row.get("url"),
+                                 "reason": "rating not present in retrieved evidence"})
+                continue
+
+            # Grounded chips from the live text only (title + snippet). Budget
+            # can only be claimed when a price was actually verified.
+            evidence_row = {
+                "title": f"{row.get('title') or ''} {row.get('features') or ''}",
+                "price": row.get("price"),
+                "category": "",
+            }
+            constraints_for_chips = dict(router_c)
+            if row.get("price") is None:
+                constraints_for_chips.pop("budget", None)
+            row.update(match_evidence(evidence_row, constraints_for_chips))
+            # Hard constraints must be VERIFIED, not merely uncontradicted. A
+            # snippet without a price cannot satisfy "under $25", so such a row
+            # becomes a "related option" rather than an exact match.
+            status = hard_constraint_status(evidence_row, router_c)
+            row["hard_status"] = status
+            row["exact_match"] = status["all_verified"]
+            row["unverified_hard"] = status["unknown"] + status["failed"]
+            if status["failed"]:
+                rejected.append({"title": row.get("title"), "url": row.get("url"),
+                                 "reason": f"fails {', '.join(status['failed'])}"})
+                continue
+            rows.append(row)
+
+        # Split: only fully verified rows can be recommendations / Top pick.
+        verified = [r for r in rows if r.get("exact_match")]
+        related = [r for r in rows if not r.get("exact_match")]
+
         web = {"mode": "fallback", **resp}
         return {
             "web": web,
-            "top_picks": rows[:max(1, min(int(
-                ((state.get("router") or {}).get("top_k") or 3)
-            ), 5))],
+            "top_picks": verified[:want],
+            "related_online": related[:want],
+            # Nothing credible online is its own honest answer, distinct from a
+            # private no-match: the UI must not fall back to generic pages.
+            # No fully verified product is its own honest state, even when
+            # related options exist to show underneath.
+            "live_unverified": (
+                 {"checked": len(resp.get("results", [])), "rejected": rejected,
+                  "related_count": len(related)}
+                 if not verified else None
+            ),
             "mode": "web_fallback",
+            # Reached here from an explicit "Search online" on a no-match: the
+            # live results ARE the answer now, so clear the no-match state
+            # rather than showing both panels at once. Rows keep their `web-N`
+            # ids — a web result is never given an AMZ2020-* citation.
+            "no_match": None,
             "steps": [step(
                 "web.search",
                 {
@@ -1419,12 +2021,17 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                 {
                     "provider": resp.get("provider"),
                     "cached": resp.get("cached", False),
-                    "result_count": len(rows),
+                    "result_count": len(verified),
+                    "related_count": len(related),
+                    "rejected_not_a_product": rejected or None,
                     "results": resp.get("results", []),
                     "error": resp.get("error"),
                 },
                 label="Searching the web",
-                detail=f"No private match · MCP → web.search · {len(rows)} live results",
+                detail=(f"No private match · MCP → web.search · {len(verified)} verified "
+                        f"product{'' if len(verified)==1 else 's'}"
+                        + (f" · {len(related)} related" if related else "")
+                        + (f" · {len(rejected)} non-product pages rejected" if rejected else "")),
             )],
         }
 
@@ -1508,12 +2115,26 @@ def build_nodes(mcp: MCPToolClient) -> dict:
         # exactly where a fabricated product or price would come from.
         nm = state.get("no_match")
         if nm:
-            budget = _money(nm.get("requested_max_price"))
             closest = nm.get("closest_available_price")
-            spoken = (f"I couldn't find anything at or below {budget} in the catalog. "
-                      + (f"The closest options start around {_money(closest)}. "
-                         if isinstance(closest, (int, float)) else "")
-                      + "Would you like to raise the budget or search online?")
+            failed = nm.get("failed_constraints") or []
+            if "max_price" in failed:
+                budget = _money(nm.get("requested_max_price"))
+                spoken = (f"I couldn't find anything at or below {budget} in the catalog. "
+                          + (f"The closest options start around {_money(closest)}. "
+                             if isinstance(closest, (int, float)) else "")
+                          + "Would you like to raise the budget or search online?")
+            elif "size" in failed:
+                size = nm.get("requested_size") or "that size"
+                spoken = (f"I found the right product type, but none of the retrieved "
+                          f"catalog options verify the {size} size. You can review the "
+                          "closest alternatives or search online.")
+            elif "audience" in failed:
+                spoken = ("The retrieved catalog options are marketed to a different "
+                          "audience, so I did not present them as exact matches. You can "
+                          "review the closest alternatives or search online.")
+            else:
+                spoken = ("I couldn't verify an exact catalog match for this product. "
+                          "Try relaxing one constraint or searching online.")
             return {
                 "answer": {"spoken_answer": spoken, "top_pick_doc_id": "", "citation_doc_ids": []},
                 "steps": [step(
@@ -1621,6 +2242,55 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                     f"replaced with {fallback!r}")
             answer["top_pick_doc_id"] = fallback
 
+        # Price grounding is checked independently of the model. A valid row id
+        # does not make a fabricated dollar amount safe: every amount in either
+        # generated text field must exist in a retrieved row or the deterministic
+        # catalog/live reconciliation evidence.
+        allowed_prices = {
+            round(float(p["price"]), 2)
+            for p in products if isinstance(p.get("price"), (int, float))
+        }
+        for match in ((reconciliation or {}).get("matches") or {}).values():
+            for field in ("catalog_price", "web_price"):
+                if isinstance(match.get(field), (int, float)):
+                    allowed_prices.add(round(float(match[field]), 2))
+        mentioned_prices = _price_mentions(
+            answer.get("spoken_answer") or "", answer.get("answer_detail") or "",
+        )
+        unsupported_prices = sorted({
+            round(price, 2) for price in mentioned_prices
+            if not any(abs(price - allowed) < 0.01 for allowed in allowed_prices)
+        })
+        if unsupported_prices:
+            top = products[0]
+            product_type = str(
+                ((state.get("router") or {}).get("constraints") or {}).get("product_type")
+                or "product"
+            ).strip()
+            verified_price = top.get("price")
+            if isinstance(verified_price, (int, float)):
+                price_text = _money(verified_price)
+                answer["spoken_answer"] = (
+                    f"The top-ranked {product_type} is listed at {price_text}. "
+                    "Its verified match details and alternatives are on screen."
+                )
+                answer["answer_detail"] = (
+                    f"{top.get('title')} is the top grounded option at {price_text}. "
+                    "The displayed price comes directly from the retrieved product record."
+                )
+            else:
+                answer["spoken_answer"] = (
+                    f"The top-ranked {product_type} has no verified price. "
+                    "Its grounded match details and alternatives are on screen."
+                )
+                answer["answer_detail"] = (
+                    f"{top.get('title')} is the top grounded option, but its retrieved "
+                    "record does not provide a verified price."
+                )
+            critic_notes.append(
+                f"replaced unsupported generated prices: {unsupported_prices}"
+            )
+
         # Critic duty: discrepancies must be surfaced in the spoken answer.
         flags = (reconciliation or {}).get("discrepancy_flags") or []
         _voiced = re.compile(r"\b(differ|discrepan|changed|higher|lower)\w*", re.I)
@@ -1665,8 +2335,9 @@ def build_nodes(mcp: MCPToolClient) -> dict:
             ), step(
                 "grounding",
                 {
-                    "check": "citation doc_ids must exist in retrieved rows; "
-                             "top_pick must be one of them; discrepancies must be voiced",
+                    "check": "citation doc_ids must exist in retrieved rows; top_pick must "
+                             "be one of them; stated prices must exist in retrieved or "
+                             "reconciled evidence; discrepancies must be voiced",
                     "known_doc_ids": sorted(known),
                 },
                 {

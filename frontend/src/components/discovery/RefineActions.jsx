@@ -43,7 +43,7 @@ export default function RefineActions({ understood, onRefine, disabled = false }
     ? [...actions.slice(0, 3), actions[actions.length - 1]]
     : actions;
 
-  // Heading is supplied by the "Narrow it down" section in Home.jsx.
+  // Heading is supplied by the compact composer section in Home.jsx.
   return (
     <div className="flex flex-wrap gap-2">
         {shown.map((a) => (

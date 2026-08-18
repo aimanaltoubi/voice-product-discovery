@@ -16,7 +16,11 @@ from graph.nodes import (  # noqa: E402
     _deterministic_safety_flags,
     _extract_material,
     _excluded_materials,
+    _extract_color,
+    _extract_size,
     _explicitly_excludes_material,
+    _find_phrase,
+    _identity_anchor_query,
     _lexical_anchor_terms,
     _matches_anchor,
     _matches_all_query_terms,
@@ -25,6 +29,7 @@ from graph.nodes import (  # noqa: E402
     _query_terms,
     _rating_from_text,
     _requires_all_anchors,
+    _requested_top_k,
     _adult_recipient_requested,
     _all_query_terms_present,
     build_nodes,
@@ -131,6 +136,12 @@ def test_safety() -> None:
 
 
 def test_query_and_anchor() -> None:
+    assert _find_phrase("1000-piece jigsaw puzzle", "1000 piece") == "1000 piece"
+    assert not _find_phrase("300 piece jigsaw puzzle", "1000 piece")
+    assert _identity_anchor_query(
+        {"product_type": "comforter", "qualitative_features": ["soft", "lightweight"]},
+        "soft lightweight comforter",
+    ) == "comforter"
     assert _query_terms("calendar less than 20 dollars") == ["calendar"]
     assert _query_terms("calendar under 20 dollars") == ["calendar"]
     assert _query_terms("eco friendly cleaner under fifteen dollars") == [
@@ -228,13 +239,35 @@ def test_router_contract() -> None:
         "needs_live": False,
     })
     assert parsed.constraints is None
+    assert parsed.top_k == 6
     assert _LIVE_RE.search("is this discontinued")
     assert not _LIVE_RE.search("recommend a pen under 5 dollars")
+    assert _extract_size("a challenging 1000-piece jigsaw puzzle") == "1000 piece"
+    assert _extract_size("a soft twin comforter") == "twin"
+    assert _extract_color("make the comforter green") == "green"
+    assert _extract_color("a greener, more sustainable comforter") is None
+    assert _requested_top_k("show me the top eight puzzles") == 8
+    assert _requested_top_k("show 99 puzzles") == 8
+    assert _requested_top_k("find a puzzle") is None
     applied = asyncio.run(build_nodes(None)["router"]({
         "transcript": "apply filters", "apply_only": True,
         "prior_constraints": {"product_type": "bottle"}, "prior_top_k": 5,
     }))
     assert applied["router"]["top_k"] == 5
+    capped = asyncio.run(build_nodes(None)["router"]({
+        "transcript": "apply filters", "apply_only": True,
+        "prior_constraints": {"product_type": "bottle"}, "prior_top_k": 99,
+    }))
+    assert capped["router"]["top_k"] == 8
+
+
+def test_historical_product_url() -> None:
+    from rag.ingest import _product_url
+
+    url = "https://www.amazon.com/example/dp/B012345678"
+    assert _product_url(url) == url
+    assert _product_url(f"{url}|https://example.com/ignored") == url
+    assert _product_url("javascript:alert(1)") is None
 
 
 def test_refinement_and_grounding() -> None:
@@ -263,6 +296,19 @@ def test_refinement_and_grounding() -> None:
         "product_type": "costume", "brand": "Star Wars",
         "budget": 30, "audience": "child", "qualitative_features": [],
     }
+
+    recolored = merge_constraints(
+        {"product_type": "bottle", "color": "pink", "required_features": ["pink"]},
+        {"color": "green"},
+    )
+    assert recolored["color"] == "green"
+    assert recolored["required_features"] == ["green"]
+    pivoted_with_priority = merge_constraints(
+        {"product_type": "bottle", "color": "pink", "required_features": ["pink"]},
+        {"product_type": "costume"},
+    )
+    assert "color" not in pivoted_with_priority
+    assert "required_features" not in pivoted_with_priority
 
     row = {"price": 45, "features": "Ultra soft and machine washable"}
     evidence = match_evidence(row, merged)
@@ -312,9 +358,9 @@ def test_live_match_and_requested_count() -> None:
     }))
     assert "does not include customer reviews" in empty_review["answer"]["spoken_answer"]
 
-    candidates = [{"doc_id": f"p{i}", "score": 1 - i / 10} for i in range(6)]
-    reranked = _mock_structured(RerankOutput, {"candidates": candidates, "top_k": 5})
-    assert len(reranked.ranked_doc_ids) == 5
+    candidates = [{"doc_id": f"p{i}", "score": 1 - i / 10} for i in range(10)]
+    reranked = _mock_structured(RerankOutput, {"candidates": candidates, "top_k": 8})
+    assert len(reranked.ranked_doc_ids) == 8
 
 
 def test_rerank_shortlist() -> None:
@@ -354,6 +400,116 @@ def test_rerank_shortlist() -> None:
               "price": 40.46}]
     # a/b are colorways of one product; c is a different price, d a different product.
     assert [r["doc_id"] for r in dedupe_listings(dupes)] == ["a", "c", "d"]
+
+
+def test_live_fallback_validation() -> None:
+    class FakeMCP:
+        def __init__(self, results: list[dict]):
+            self.results = results
+            self.last_args: dict | None = None
+
+        async def call(self, name: str, args: dict) -> dict:
+            assert name == "web.search"
+            self.last_args = args
+            return {"provider": "fake", "results": self.results}
+
+    results = [
+        {
+            "title": "Acme Glass Water Bottle 20 oz",
+            "url": "https://www.walmart.com/ip/acme-glass-water-bottle/123",
+            "snippet": "Rated 4.7 out of 5 stars. Current price $19.99.",
+        },
+        {
+            "title": "Premium Glass Water Bottle 24 oz",
+            "url": "https://www.target.com/p/premium-glass-water-bottle/-/A-123",
+            "snippet": "Rated 4.9 out of 5 stars. Current price $35.00.",
+        },
+        {
+            "title": "Glass Cleaner Spray with Fresh Scent",
+            "url": "https://www.target.com/p/glass-cleaner/-/A-456",
+            "snippet": "Rated 4.8 out of 5 stars. Current price $8.00.",
+        },
+        {
+            "title": "Amazon Search Results",
+            "url": "https://www.amazon.com/s?k=glass+water+bottle",
+            "snippet": "Compare products and prices.",
+        },
+    ]
+    mcp = FakeMCP(results)
+    state = {
+        "transcript": "check the current prices",
+        "effective_query": "highest rated glass water bottle under $25",
+        "router": {
+            "constraints": {
+                "product_type": "water bottle", "material": "glass", "budget": 25,
+            },
+            "needs_live": True,
+            "top_k": 3,
+        },
+        "plan": {
+            "sources": ["rag.search", "web.search"],
+            "retrieval_filters": {"material": "glass", "max_price": 25},
+        },
+    }
+    found = asyncio.run(build_nodes(mcp)["web_fallback"](state))
+    assert mcp.last_args and "highest rated glass water bottle" in mcp.last_args["query"]
+    assert [r["title"] for r in found["top_picks"]] == ["Acme Glass Water Bottle 20 oz"]
+    assert found["top_picks"][0]["price"] == 19.99
+    assert found["top_picks"][0]["rating"] == 4.7
+    assert found["related_online"] == []
+    assert found["live_unverified"] is None
+    assert len(found["steps"][0]["output"]["rejected_not_a_product"]) == 3
+
+    missing_price = FakeMCP([{
+        "title": "Acme Glass Water Bottle 20 oz",
+        "url": "https://www.walmart.com/ip/acme-glass-water-bottle/123",
+        "snippet": "Reusable glass bottle with a leakproof lid.",
+    }])
+    related = asyncio.run(build_nodes(missing_price)["web_fallback"]({
+        **state,
+        "effective_query": "glass water bottle under $25",
+    }))
+    assert related["top_picks"] == []
+    assert len(related["related_online"]) == 1
+    assert related["related_online"][0]["unverified_hard"] == ["Under $25"]
+    assert related["live_unverified"]["related_count"] == 1
+
+
+def test_answer_critic_rejects_unsupported_prices() -> None:
+    import graph.nodes as nodes
+    from graph.state import AnswerOutput
+
+    original = nodes.call_structured
+
+    async def hallucinated_price(_prompt, schema, *, node, context=None):
+        assert schema is AnswerOutput and node == "answerer"
+        return AnswerOutput(
+            spoken_answer="My top pick costs $999. Details are on screen.",
+            answer_detail="The retrieved option costs $999.",
+            top_pick_doc_id="p1",
+            citation_doc_ids=["p1", "not-retrieved"],
+        )
+
+    nodes.call_structured = hallucinated_price
+    try:
+        result = asyncio.run(nodes.build_nodes(None)["answer"]({
+            "transcript": "find a glass water bottle",
+            "router": {"constraints": {"product_type": "water bottle"}},
+            "plan": {"comparison_criteria": ["price"]},
+            "top_picks": [{
+                "doc_id": "p1", "title": "Acme Glass Water Bottle", "price": 19.99,
+            }],
+            "mode": "private",
+        }))
+    finally:
+        nodes.call_structured = original
+
+    answer = result["answer"]
+    assert "$999" not in answer["spoken_answer"] + answer["answer_detail"]
+    assert "$19.99" in answer["spoken_answer"]
+    assert answer["citation_doc_ids"] == ["p1"]
+    critic = result["steps"][-1]["output"]["critic_notes"]
+    assert any("unsupported generated prices" in note for note in critic)
 
 
 if __name__ == "__main__":

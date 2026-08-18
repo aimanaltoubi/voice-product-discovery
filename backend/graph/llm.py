@@ -92,6 +92,14 @@ _SAFETY_PATTERNS = [
     (r"\b(explosive|weapon|poison(ing)? (someone|a person))\b", "harmful_intent"),
 ]
 _LIVE_PATTERNS = r"\b(current|latest|right now|today|in stock|availability|available now|live price)\b"
+_MOCK_FEATURES = {
+    "machine washable": r"\bmachine[- ]washable\b",
+    "soft": r"\bsoft\b",
+    "lightweight": r"\blight[- ]?weight\b",
+    "compact": r"\bcompact\b",
+    "durable": r"\bdurable\b",
+    "easy to wash": r"\beasy to wash\b",
+}
 
 # Category nouns, matched on word boundaries. A bare `"clean" in transcript`
 # substring test also fires on "easy to clean", which made every appliance
@@ -132,6 +140,7 @@ def _mock_structured(schema: Type[T], ctx: dict[str, Any]) -> T:
     if name == "RouterOutput":
         t = (ctx.get("transcript") or "").lower()
         material = next((m for m in _MATERIALS if m in t), None)
+        qualitative = [label for label, pattern in _MOCK_FEATURES.items() if re.search(pattern, t)]
         flags = sorted({f for pat, f in _SAFETY_PATTERNS if re.search(pat, t)})
         return schema(
             task="product_recommendation",
@@ -141,6 +150,7 @@ def _mock_structured(schema: Type[T], ctx: dict[str, Any]) -> T:
                 "brand": None,
                 "category": _infer_category(t),
                 "eco_friendly": bool(re.search(r"\b(eco|green|natural|plant[- ]based|non[- ]toxic)\b", t)) or None,
+                "qualitative_features": qualitative,
             },
             safety_flags=flags,
             needs_live=bool(re.search(_LIVE_PATTERNS, t)),
@@ -177,7 +187,7 @@ def _mock_structured(schema: Type[T], ctx: dict[str, Any]) -> T:
                          "relevance (retrieval score) within the applied filters.")
         return schema(
             ranked_doc_ids=[p["doc_id"] for p in ranked[:max(
-                1, min(int(ctx.get("top_k") or 3), 5)
+                1, min(int(ctx.get("top_k") or 6), 8)
             )]],
             rationale=rationale,
         )

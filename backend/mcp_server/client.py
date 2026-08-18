@@ -52,7 +52,10 @@ class MCPToolClient:
             cwd=str(BACKEND_DIR),
             env={**os.environ, "PYTHONPATH": str(BACKEND_DIR)},
         )
-        read, write = await self._stack.enter_async_context(stdio_client(params))
+        # Jupyter/Colab's sys.stderr has no real OS fileno(), which the mcp SDK
+        # needs when spawning the server subprocess. Use a real file instead.
+        _errlog = open(BACKEND_DIR / "logs" / "mcp_stdio_stderr.log", "w")
+        read, write = await self._stack.enter_async_context(stdio_client(params, errlog=_errlog))
         self._session = await self._stack.enter_async_context(ClientSession(read, write))
         await self._session.initialize()
 

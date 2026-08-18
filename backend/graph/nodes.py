@@ -1837,17 +1837,12 @@ def build_nodes(mcp: MCPToolClient) -> dict:
         return out_state
 
     def route_after_retrieve(state: dict) -> str:
-        # A hard constraint that nothing satisfies is an answer in itself — go
-        # straight to the answerer rather than quietly firing a live web search
-        # the user never asked for. But when the user HAS explicitly asked for
-        # live information (the no-match screen's "Search online" sets this),
-        # a no-match must not swallow that request: fall through to the live
-        # path so the search can still be answered from the web.
-        if state.get("no_match"):
-            if (state.get("router") or {}).get("needs_live"):
-                return "web_fallback"
-            return "answer"
-        if not state.get("top_picks"):
+        # Any time the curated 2020 Amazon dataset can't satisfy the request —
+        # whether nothing in it is even close, or a hard constraint (budget,
+        # size, audience) filtered out every candidate — fall through to a
+        # live web search automatically rather than making the user click
+        # "Search online" themselves.
+        if state.get("no_match") or not state.get("top_picks"):
             return "web_fallback"
         if "web.search" in (state.get("plan", {}).get("sources") or []):
             return "web_compare"

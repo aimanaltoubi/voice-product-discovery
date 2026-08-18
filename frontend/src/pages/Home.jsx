@@ -51,7 +51,6 @@ function AssistantOutcome({ result, busy, ttsUrl, onPlay, voiceTranscript }) {
               ≈{result.spoken_answer.split(/\s+/).length} spoken words
             </span>
           </div>
-          {ttsUrl && <audio controls autoPlay src={ttsUrl} className="mt-3 h-9 w-full" />}
         </section>
       )}
 
@@ -599,6 +598,15 @@ export default function Home() {
             voiceTranscript={lastVoiceTranscript}
           />
         </div>
+
+        {ttsUrl && (
+          <audio
+            controls
+            autoPlay
+            src={ttsUrl}
+            className="mx-4 mb-4 h-9 w-[calc(100%-2rem)] sm:mx-6 sm:w-[calc(100%-3rem)] lg:mx-0 lg:w-full lg:px-6"
+          />
+        )}
       </main>
     </div>
   );

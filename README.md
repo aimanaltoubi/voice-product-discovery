@@ -510,6 +510,10 @@ voice-product-discovery/
 - **Live-search quality depends on provider snippets.** The system prefers an
   honest unverified state over upgrading weak evidence into a recommendation.
 
+## Contributor
+
+- [Yining Mao](https://github.com/ymao21)
+
 ## Documentation map
 
 - [`docs/architecture.md`](docs/architecture.md) — request lifecycle, graph nodes,

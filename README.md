@@ -513,6 +513,9 @@ voice-product-discovery/
 ## Contributor
 
 - [Yining Mao](https://github.com/ymao21)
+- [Gabe Horas](https://github.com/gabehoras)
+- [Sieon Lee](https://github.com/SieonLee)
+- [Aiman al-toubi](https://github.com/aimanaltoubi)
 
 ## Documentation map
 

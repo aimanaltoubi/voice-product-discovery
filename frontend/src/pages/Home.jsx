@@ -377,6 +377,20 @@ export default function Home() {
     runDiscovery(query);
   };
 
+  /** Answer the clarifying question by setting the field the choice names.
+   *  Mode "apply" carries the constraints through verbatim, so the answer
+   *  cannot be lost to a failed re-extraction and the question re-asked. */
+  const applyClarification = ({ field, value, label }) => {
+    if (!session?.constraints) return;
+    const constraints = { ...session.constraints, [field]: value };
+    setSession((s) => ({ ...s, constraints }));
+    runDiscovery(
+      label,
+      { constraints, top_k: session.top_k, changes: [`Audience: ${value}`] },
+      'apply'
+    );
+  };
+
   const hasSession = Boolean(session?.constraints?.product_type);
   const isNoMatch = Boolean(result?.no_match);
   const isNoLiveMatch = Boolean(result?.live_unverified);
@@ -407,7 +421,7 @@ export default function Home() {
               messages={conversation}
               result={result}
               busy={busy}
-              onClarify={refine}
+              onClarify={applyClarification}
               onSearchOnline={searchOnline}
             />
 

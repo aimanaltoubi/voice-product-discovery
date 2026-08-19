@@ -126,6 +126,17 @@ class RouterOutput(BaseModel):
         default=6,
         description="How many qualified products to return, capped at 8. Default 6.")
 
+    # A model may send an explicit `null` for a field it has nothing to say
+    # about ("It's for a child." carries no task). Pydantic only applies a
+    # default when the key is ABSENT, so an explicit null raises instead.
+    # Treat null as "not answered" and fall back to the declared default.
+    @field_validator("task", "safety_flags", "needs_live", "top_k", mode="before")
+    @classmethod
+    def _null_means_default(cls, v, info):
+        if v is not None:
+            return v
+        return cls.model_fields[info.field_name].get_default(call_default_factory=True)
+
 
 class RetrievalFilters(BaseModel):
     """Metadata filters for the private catalog (prompts/planner.md)."""

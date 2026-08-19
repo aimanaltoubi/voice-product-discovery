@@ -1,6 +1,23 @@
 import React, { useEffect, useRef } from 'react';
 import { Globe, MessageCircleQuestion } from 'lucide-react';
 
+// Quick answers to the clarifying question. All four answer the "who is it
+// for" half, which holds for every product: a backpack, a comforter and a
+// puzzle can each be for a child or a gift. Use-case answers cannot be fixed
+// the same way ("travel" fits a backpack, not a comforter), so that half is
+// left to the free-text box the prompt above points to.
+//
+// Each choice carries the constraint field it answers, and the click applies
+// that value directly rather than sending prose back through the Router: the
+// shopper already made an explicit choice, and re-extracting it from a
+// sentence can fail and re-ask the question they just answered.
+const CLARIFY_CHOICES = [
+  { label: 'for me', field: 'audience', value: 'adult' },
+  { label: 'for a child', field: 'audience', value: 'child' },
+  { label: 'for a family', field: 'audience', value: 'family' },
+  { label: 'as a gift', field: 'audience', value: 'gift' },
+];
+
 /**
  * Presentation-only shopping history. SearchContext remains the decision
  * state; these rows preserve only shopper turns and short acknowledgements.
@@ -94,14 +111,14 @@ export default function ShoppingConversation({
               <span>Choose a quick answer, or type your own below.</span>
             </div>
             <div className="mt-2.5 flex flex-wrap gap-1.5">
-              {['for everyday use', 'for an apartment', 'for pet hair', 'for travel'].map((choice) => (
+              {CLARIFY_CHOICES.map((choice) => (
                 <button
-                  key={choice}
+                  key={choice.label}
                   type="button"
-                  onClick={() => onClarify(`It's ${choice}.`)}
+                  onClick={() => onClarify(choice)}
                   className="rounded-lg border border-blue-200 bg-white px-2.5 py-1.5 text-[12px] font-medium text-slate-700 hover:bg-blue-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                 >
-                  {choice.replace(/^for /, '')}
+                  {choice.label}
                 </button>
               ))}
             </div>

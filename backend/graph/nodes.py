@@ -334,11 +334,15 @@ def qualifies_as_live_product(row: dict, product_type: str | None) -> tuple[bool
     if _GENERIC_TITLE_RX.search(title):
         return False, "generic page title"
 
-    parsed = urlparse(url)
-    path = parsed.path or "/"
-    is_product_path = bool(_PRODUCT_PATH_RX.search(path))
-    if not is_product_path and _NON_PRODUCT_PATH_RX.search(path):
-        return False, "navigation/category/search URL"
+    # A shopping-API row IS a product by construction -- it carries a structured
+    # price and the selling retailer -- and its link is the provider's redirect,
+    # so the URL-shape test below would reject it for looking like a search page.
+    if row.get("result_type") != "shopping":
+        parsed = urlparse(url)
+        path = parsed.path or "/"
+        is_product_path = bool(_PRODUCT_PATH_RX.search(path))
+        if not is_product_path and _NON_PRODUCT_PATH_RX.search(path):
+            return False, "navigation/category/search URL"
 
     # Same identity rule as the private catalog, applied to the title (web rows
     # carry no category, so the taxonomy fallback cannot help here).
@@ -964,6 +968,10 @@ def _matches_material(row: dict, material: str | None) -> bool:
 
 
 def _is_search_results_page(row: dict) -> bool:
+    # A shopping-API row is a single product even though its link goes through
+    # Google's shopping redirect, which is shaped like a search URL.
+    if row.get("result_type") == "shopping":
+        return False
     url = str(row.get("url") or "")
     return bool(re.search(r"/(?:s|search)(?:[/?]|$)|[?&](?:k|q)=", url, re.I))
 
@@ -1920,7 +1928,10 @@ def build_nodes(mcp: MCPToolClient) -> dict:
             # retrieved evidence. If neither contains one, leave it unknown.
             price = (r.get("price") if isinstance(r.get("price"), (int, float))
                      else _price_from_text(r.get("snippet", ""), r.get("title", "")))
-            rating = _rating_from_text(r.get("snippet", ""), r.get("title", ""))
+            # Prefer values the provider returned as structured fields; fall
+            # back to parsing the snippet only when it did not supply them.
+            rating = (r["rating"] if isinstance(r.get("rating"), (int, float))
+                      else _rating_from_text(r.get("snippet", ""), r.get("title", "")))
             raw_rows.append({
                 "doc_id": f"web-{len(raw_rows) + 1}",
                 "sku": f"web-{len(raw_rows) + 1}",
@@ -1931,9 +1942,13 @@ def build_nodes(mcp: MCPToolClient) -> dict:
                 "rating": rating,
                 "features": r.get("snippet"),
                 "url": r.get("url"),
-                "retailer": _retailer_from_url(r.get("url") or ""),
+                "retailer": r.get("retailer") or _retailer_from_url(r.get("url") or ""),
                 "availability": r.get("availability"),
                 "source": "web",
+                # Carried through so the downstream filters keep treating a
+                # shopping-API row as a product rather than re-judging it by
+                # its (redirect-shaped) URL.
+                "result_type": r.get("result_type"),
             })
 
         anchor_query = str(wanted_type or query)

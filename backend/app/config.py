@@ -77,9 +77,13 @@ class Settings:
     OPENAI_TTS_VOICE: str = _get("OPENAI_TTS_VOICE", "alloy")
 
     # ---- web.search MCP tool ----
-    # ddg (keyless default) | serper | brave | tavily
+    # ddg (keyless default) | serper | brave | tavily | searchapi | serpapi
+    # NOTE: "serper" (serper.dev) and "serpapi" (serpapi.com) are different
+    # services with different key formats and endpoints -- do not mix them up.
     WEB_SEARCH_PROVIDER: str = _get("WEB_SEARCH_PROVIDER", "ddg").lower()
     SERPER_API_KEY: str = _get("SERPER_API_KEY")
+    SEARCHAPI_API_KEY: str = _get("SEARCHAPI_API_KEY")
+    SERPAPI_API_KEY: str = _get("SERPAPI_API_KEY")
     BRAVE_API_KEY: str = _get("BRAVE_API_KEY")
     TAVILY_API_KEY: str = _get("TAVILY_API_KEY")
 

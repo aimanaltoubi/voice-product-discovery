@@ -1,8 +1,8 @@
 """web.search backends. All providers normalize to the brief's schema:
     {title, url, snippet, price?, availability?}
 
-Default is the keyless DuckDuckGo backend (`ddgs`); Serper / Brave / Tavily
-are official search APIs selected via WEB_SEARCH_PROVIDER + an API key.
+Default is the keyless DuckDuckGo backend (`ddgs`); Serper / Brave / Tavily /
+SearchApi are official search APIs selected via WEB_SEARCH_PROVIDER + an API key.
 We only call search APIs / libraries — we never scrape result pages, which is
 how this layer respects robots.txt / ToS (see docs/safety.md).
 """
@@ -88,8 +88,76 @@ def _search_tavily(query: str, n: int) -> list[dict]:
     return [_normalize(i.get("title", ""), i.get("url", ""), i.get("content", "")) for i in items]
 
 
+def _search_searchapi(query: str, n: int) -> list[dict]:
+    r = httpx.get(
+        "https://www.searchapi.io/api/v1/search",
+        params={"engine": "google", "q": query, "num": n},
+        headers={"Authorization": f"Bearer {settings.SEARCHAPI_API_KEY}"},
+        timeout=12,
+    )
+    r.raise_for_status()
+    items = (r.json().get("organic_results") or [])[:n]
+    return [_normalize(i.get("title", ""), i.get("link", ""), i.get("snippet", "")) for i in items]
+
+
+def _search_serpapi(query: str, n: int) -> list[dict]:
+    # SerpApi (serpapi.com) — distinct from Serper (serper.dev): the key goes in
+    # the query string and results come back under "organic_results".
+    r = httpx.get(
+        "https://serpapi.com/search.json",
+        params={"engine": "google", "q": query, "num": n,
+                "api_key": settings.SERPAPI_API_KEY},
+        timeout=20,
+    )
+    r.raise_for_status()
+    items = (r.json().get("organic_results") or [])[:n]
+    return [_normalize(i.get("title", ""), i.get("link", ""), i.get("snippet", "")) for i in items]
+
+
+def _search_serpapi_shopping(query: str, n: int) -> list[dict]:
+    """SerpApi's Google Shopping engine.
+
+    Unlike a web search, this returns PRODUCTS: every row carries a structured
+    price, the selling retailer, and usually a rating. That matters here because
+    a plain web search answers a category query ("work backpack") with category
+    and search pages, which are correctly rejected downstream as non-products --
+    measured at 0 usable rows for most category queries, against 40 here.
+
+    The link is a Google Shopping redirect rather than a merchant product URL,
+    so rows are tagged `result_type="shopping"`. Downstream that tag is what
+    vouches for them being products; the URL-shape heuristic cannot.
+    """
+    r = httpx.get(
+        "https://serpapi.com/search.json",
+        params={"engine": "google_shopping", "q": query, "gl": "us", "hl": "en",
+                "api_key": settings.SERPAPI_API_KEY},
+        timeout=20,
+    )
+    r.raise_for_status()
+    out = []
+    for i in (r.json().get("shopping_results") or [])[:n]:
+        url = i.get("product_link") or i.get("link") or ""
+        if not url:
+            continue
+        row = {
+            "title": i.get("title", ""),
+            "url": url,
+            "snippet": (i.get("snippet") or "")[:400],
+            "retailer": i.get("source"),
+            "result_type": "shopping",
+        }
+        if isinstance(i.get("extracted_price"), (int, float)):
+            row["price"] = float(i["extracted_price"])
+        if isinstance(i.get("rating"), (int, float)):
+            row["rating"] = float(i["rating"])
+        out.append(row)
+    return out
+
+
 _PROVIDERS = {"ddg": _search_ddg, "serper": _search_serper,
-              "brave": _search_brave, "tavily": _search_tavily}
+              "brave": _search_brave, "tavily": _search_tavily,
+              "searchapi": _search_searchapi, "serpapi": _search_serpapi,
+              "serpapi_shopping": _search_serpapi_shopping}
 
 
 def _domain_allowed(url: str) -> bool:
@@ -115,7 +183,12 @@ def run_web_search(query: str, max_results: int = 5) -> dict[str, Any]:
         return {"provider": provider, "results": [], "error": f"{type(e).__name__}: {e}"}
 
     raw = [r for r in raw if r.get("url")]
-    filtered = [r for r in raw if _domain_allowed(r["url"])]
+    # Shopping-engine rows link through Google's shopping redirect, so the
+    # retail-domain allowlist cannot judge them. The provider already vouches
+    # that they are products and names the selling retailer, so they skip the
+    # host check; every other row is still filtered to the allowlist.
+    filtered = [r for r in raw
+                if r.get("result_type") == "shopping" or _domain_allowed(r["url"])]
     relaxed = False
     if not filtered and raw and not settings.WEB_ALLOWLIST_STRICT:
         filtered, relaxed = raw, True
